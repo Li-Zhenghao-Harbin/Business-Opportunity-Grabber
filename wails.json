@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "business-opportunity-grabber",
+  "outputfilename": "business-opportunity-grabber",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Li-Zhenghao-Harbin",
+    "email": "dream7c@126.com"
+  }
+}
