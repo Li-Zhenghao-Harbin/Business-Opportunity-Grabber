@@ -18,6 +18,9 @@ type Tab = 'opportunities' | 'sites' | 'tasks'
 const activeTab = ref<Tab>('opportunities')
 const loading = ref(false)
 const message = ref('')
+const crawlElapsedSeconds = ref(0)
+let crawlElapsedTimer: ReturnType<typeof setInterval> | null = null
+const crawlTimeoutMs = 60_000
 const dashboard = ref<main.Dashboard>({
   siteCount: 0,
   enabledSiteCount: 0,
@@ -132,6 +135,59 @@ async function refreshOpportunities() {
   }
 }
 
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    success: '成功',
+    failed: '失败',
+    running: '运行中'
+  }
+  return labels[status] || status
+}
+
+function summarizeCrawlTasks(result: main.CrawlTask[]) {
+  const newCount = result.reduce((sum, task) => sum + task.newCount, 0)
+  const duplicateCount = result.reduce((sum, task) => sum + task.duplicateCount, 0)
+  const failedTasks = result.filter((task) => task.status === 'failed' || task.failedCount > 0)
+
+  if (failedTasks.length) {
+    const failureText = failedTasks
+      .map((task) => `${task.siteName}：${task.errorMessage || '抓取失败'}`)
+      .join('；')
+    return `抓取完成，但有 ${failedTasks.length} 个站点失败。新增 ${newCount} 条，重复/更新 ${duplicateCount} 条。${failureText}`
+  }
+
+  return `抓取完成：新增 ${newCount} 条，重复/更新 ${duplicateCount} 条`
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMessage: string) {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(timeoutMessage)), ms)
+  })
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer)
+    }),
+    timeout
+  ])
+}
+
+function startCrawlTimer() {
+  crawlElapsedSeconds.value = 0
+  if (crawlElapsedTimer) clearInterval(crawlElapsedTimer)
+  crawlElapsedTimer = setInterval(() => {
+    crawlElapsedSeconds.value += 1
+    message.value = `正在抓取，请稍候...已耗时 ${crawlElapsedSeconds.value} 秒`
+  }, 1000)
+}
+
+function stopCrawlTimer() {
+  if (crawlElapsedTimer) {
+    clearInterval(crawlElapsedTimer)
+    crawlElapsedTimer = null
+  }
+}
+
 async function saveSite() {
   loading.value = true
   message.value = ''
@@ -166,19 +222,23 @@ async function removeSite(id: string) {
 async function runCrawl() {
   loading.value = true
   message.value = '正在抓取，请稍候...'
+  startCrawlTimer()
   try {
-    const result = await RunCrawl({
-      siteIds: crawlForm.siteIds,
-      keyword: crawlForm.keyword,
-      days: Number(crawlForm.days) || 7
-    })
-    const newCount = result.reduce((sum, task) => sum + task.newCount, 0)
-    const duplicateCount = result.reduce((sum, task) => sum + task.duplicateCount, 0)
-    message.value = `抓取完成：新增 ${newCount} 条，重复/更新 ${duplicateCount} 条`
+    const result = await withTimeout(
+      RunCrawl({
+        siteIds: crawlForm.siteIds,
+        keyword: crawlForm.keyword,
+        days: Number(crawlForm.days) || 7
+      }),
+      crawlTimeoutMs,
+      '抓取超过 60 秒仍未返回，请到任务日志查看是否有长时间运行或失败的站点。'
+    )
+    message.value = summarizeCrawlTasks(result)
     await refreshAll()
   } catch (error) {
-    message.value = String(error)
+    message.value = error instanceof Error ? error.message : String(error)
   } finally {
+    stopCrawlTimer()
     loading.value = false
   }
 }
@@ -326,8 +386,14 @@ onMounted(refreshAll)
               <dd>{{ selectedOpportunity.noticeType || '公告' }}</dd>
               <dt>发布时间</dt>
               <dd>{{ selectedOpportunity.publishTime || '未识别' }}</dd>
+              <dt>发布单位</dt>
+              <dd>{{ selectedOpportunity.buyer || '未识别' }}</dd>
+              <dt>项目状态</dt>
+              <dd>{{ selectedOpportunity.region || '未识别' }}</dd>
               <dt>编号</dt>
               <dd>{{ selectedOpportunity.tenderNo || '未识别' }}</dd>
+              <dt>截止时间</dt>
+              <dd>{{ selectedOpportunity.deadline || '未识别' }}</dd>
             </dl>
             <p class="content-text">{{ selectedOpportunity.content }}</p>
             <label>
@@ -433,7 +499,7 @@ onMounted(refreshAll)
             <tbody>
               <tr v-for="task in tasks" :key="task.id">
                 <td>{{ task.siteName }}</td>
-                <td>{{ task.status }}</td>
+                <td>{{ statusLabel(task.status) }}</td>
                 <td>{{ task.newCount }}</td>
                 <td>{{ task.duplicateCount }}</td>
                 <td>{{ task.failedCount }}</td>

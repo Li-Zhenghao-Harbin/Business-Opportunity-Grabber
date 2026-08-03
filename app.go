@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -21,6 +22,16 @@ import (
 )
 
 const defaultSGCCURL = "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe"
+const crawlRequestTimeout = 30 * time.Second
+const sgccNoticeListURL = "https://ecp.sgcc.com.cn/ecp2.0/ecpwcmcore/index/noteList"
+const sgccListSpeMenuID = "2018032700291334"
+
+var (
+	scriptTagRE = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	styleTagRE  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	htmlTagRE   = regexp.MustCompile(`(?is)<[^>]+>`)
+	spaceRE     = regexp.MustCompile(`\s+`)
+)
 
 type App struct {
 	ctx       context.Context
@@ -106,6 +117,43 @@ type OpportunityQuery struct {
 	SiteID        string `json:"siteId"`
 	OnlyFavorite  bool   `json:"onlyFavorite"`
 	OnlyWithMatch bool   `json:"onlyWithMatch"`
+}
+
+type sgccNoteListRequest struct {
+	Index           int    `json:"index"`
+	Size            int    `json:"size"`
+	FirstPageMenuID string `json:"firstPageMenuId"`
+	PurOrgStatus    string `json:"purOrgStatus"`
+	PurOrgCode      string `json:"purOrgCode"`
+	PurType         string `json:"purType"`
+	NoticeType      string `json:"noticeType"`
+	OrgID           string `json:"orgId"`
+	Key             string `json:"key"`
+}
+
+type sgccNoteListResponse struct {
+	Successful  bool `json:"successful"`
+	ResultValue struct {
+		NoteList []sgccNotice `json:"noteList"`
+		Count    int          `json:"count"`
+	} `json:"resultValue"`
+	ResultHint string `json:"resultHint"`
+	Type       string `json:"type"`
+}
+
+type sgccNotice struct {
+	PublishOrgName    string          `json:"publishOrgName"`
+	Code              string          `json:"code"`
+	PrjStatus         json.RawMessage `json:"prjStatus"`
+	FirstPageDocID    json.RawMessage `json:"firstPageDocId"`
+	NoticeType        json.RawMessage `json:"noticeType"`
+	Title             string          `json:"title"`
+	NoticePublishTime string          `json:"noticePublishTime"`
+	NoticeID          json.RawMessage `json:"noticeId"`
+	TopEndTime        string          `json:"topEndTime"`
+	DocType           string          `json:"doctype"`
+	FirstPageMenuID   json.RawMessage `json:"firstPageMenuId"`
+	ID                json.RawMessage `json:"id"`
 }
 
 func NewApp() *App {
@@ -387,14 +435,25 @@ func (a *App) resolveTargetsLocked(ids []string) []SiteConfig {
 	return targets
 }
 
-func (a *App) crawlSite(site SiteConfig, req CrawlRequest) CrawlTask {
-	task := CrawlTask{
-		ID:        makeID(site.ID + nowString()),
+func (a *App) crawlSite(site SiteConfig, req CrawlRequest) (task CrawlTask) {
+	startedAt := nowString()
+	task = CrawlTask{
+		ID:        makeID(fmt.Sprintf("%s-%d", site.ID, time.Now().UnixNano())),
 		SiteID:    site.ID,
 		SiteName:  site.Name,
 		Status:    "running",
-		StartedAt: nowString(),
+		StartedAt: startedAt,
 	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			task.Status = "failed"
+			task.FailedCount = 1
+			task.ErrorMessage = fmt.Sprintf("抓取任务异常：%v", recovered)
+			task.FinishedAt = nowString()
+			a.recordTask(task)
+		}
+	}()
 
 	items, err := a.fetchOpportunities(site, req)
 	task.TotalCount = len(items)
@@ -417,7 +476,17 @@ func (a *App) crawlSite(site SiteConfig, req CrawlRequest) CrawlTask {
 }
 
 func (a *App) fetchOpportunities(site SiteConfig, req CrawlRequest) ([]Opportunity, error) {
-	httpReq, err := http.NewRequest(http.MethodGet, site.BaseURL, nil)
+	if site.RenderMode == "browser" {
+		return nil, errors.New("该站点配置为浏览器渲染模式，但当前版本尚未实现浏览器渲染抓取，请先改为 HTTP 静态抓取或配置真实列表接口")
+	}
+	if site.SiteType == "sgcc" || strings.Contains(site.BaseURL, "ecp.sgcc.com.cn") {
+		return a.fetchSGCCOpportunities(site, req)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), crawlRequestTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, site.BaseURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -458,6 +527,179 @@ func (a *App) fetchOpportunities(site SiteConfig, req CrawlRequest) ([]Opportuni
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (a *App) fetchSGCCOpportunities(site SiteConfig, req CrawlRequest) ([]Opportunity, error) {
+	pageSize := 20
+	if req.Days > 30 {
+		pageSize = 50
+	}
+	payload := sgccNoteListRequest{
+		Index:           1,
+		Size:            pageSize,
+		FirstPageMenuID: sgccListSpeMenuID,
+		Key:             strings.TrimSpace(req.Keyword),
+	}
+
+	var data sgccNoteListResponse
+	if err := a.postJSON(sgccNoticeListURL, payload, &data); err != nil {
+		return nil, err
+	}
+	if !data.Successful {
+		if data.ResultHint != "" {
+			return nil, fmt.Errorf("国家电网公告接口返回失败：%s", data.ResultHint)
+		}
+		return nil, errors.New("国家电网公告接口返回失败")
+	}
+
+	cutoff := time.Time{}
+	if req.Days > 0 {
+		cutoff = time.Now().AddDate(0, 0, -req.Days)
+	}
+
+	items := make([]Opportunity, 0, len(data.ResultValue.NoteList))
+	for _, notice := range data.ResultValue.NoteList {
+		item := sgccNoticeToOpportunity(notice, site, req)
+		if item.Title == "" {
+			continue
+		}
+		if !cutoff.IsZero() && item.PublishTime != "" {
+			publishedAt, err := time.Parse("2006-01-02", item.PublishTime)
+			if err == nil && publishedAt.Before(cutoff) {
+				continue
+			}
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (a *App) postJSON(endpoint string, payload any, target any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), crawlRequestTimeout)
+	defer cancel()
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("User-Agent", "Mozilla/5.0 BOG/0.1")
+	httpReq.Header.Set("Accept", "application/json, text/plain, */*")
+	httpReq.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Origin", "https://ecp.sgcc.com.cn")
+	httpReq.Header.Set("Referer", defaultSGCCURL)
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("访问失败：HTTP %d", resp.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 4*1024*1024)).Decode(target)
+}
+
+func sgccNoticeToOpportunity(notice sgccNotice, site SiteConfig, req CrawlRequest) Opportunity {
+	noticeID := jsonValueString(notice.NoticeID)
+	if noticeID == "" {
+		noticeID = jsonValueString(notice.ID)
+	}
+	docID := jsonValueString(notice.FirstPageDocID)
+	menuID := jsonValueString(notice.FirstPageMenuID)
+	if menuID == "" {
+		menuID = sgccListSpeMenuID
+	}
+	status := sgccProjectStatus(jsonValueString(notice.PrjStatus))
+	sourceURL := sgccContentURL(docID, menuID)
+	content := strings.Join(cleanList([]string{
+		"项目名称：" + notice.Title,
+		"项目编号：" + notice.Code,
+		"项目状态：" + status,
+		"发布单位：" + notice.PublishOrgName,
+		"创建时间：" + notice.NoticePublishTime,
+		"截止时间：" + notice.TopEndTime,
+	}), "\n")
+
+	item := Opportunity{
+		ID:              makeID(site.ID + noticeID + docID + notice.Title),
+		SiteID:          site.ID,
+		SourceSite:      site.Name,
+		Title:           notice.Title,
+		NoticeType:      inferSGCCNoticeType(notice),
+		PublishTime:     normalizeSGCCDate(notice.NoticePublishTime),
+		Region:          status,
+		TenderNo:        notice.Code,
+		Buyer:           notice.PublishOrgName,
+		Deadline:        notice.TopEndTime,
+		SourceURL:       sourceURL,
+		Content:         content,
+		MatchedKeywords: matchKeywords(notice.Title+" "+notice.Code+" "+notice.PublishOrgName+" "+content, site, req),
+		CreatedAt:       nowString(),
+		UpdatedAt:       nowString(),
+	}
+	item.ContentHash = makeID(item.SourceURL + item.Title + item.Content)
+	return item
+}
+
+func sgccContentURL(docID string, menuID string) string {
+	if docID == "" {
+		return defaultSGCCURL
+	}
+	return fmt.Sprintf("https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/content/%s_1_%s?docId=%s_%s", menuID, menuID, docID, menuID)
+}
+
+func inferSGCCNoticeType(notice sgccNotice) string {
+	if notice.DocType != "" {
+		switch notice.DocType {
+		case "doci-change":
+			return "变更公告"
+		case "doci-bid":
+			return "招标公告"
+		}
+	}
+	return inferNoticeType(notice.Title)
+}
+
+func sgccProjectStatus(value string) string {
+	switch value {
+	case "1":
+		return "正在招标"
+	case "2":
+		return "已截标"
+	case "3":
+		return "已结束"
+	default:
+		if value != "" {
+			return value
+		}
+		return "未知"
+	}
+}
+
+func normalizeSGCCDate(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 10 {
+		return value[:10]
+	}
+	return value
+}
+
+func jsonValueString(raw json.RawMessage) string {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	return strings.Trim(value, `"`)
 }
 
 func parseHTMLForOpportunities(raw string, site SiteConfig, req CrawlRequest) []Opportunity {
@@ -617,17 +859,15 @@ func dedupeKey(item Opportunity) string {
 }
 
 func stripScripts(raw string) string {
-	re := regexp.MustCompile(`(?is)<(script|style)\b.*?</\1>`)
-	return re.ReplaceAllString(raw, " ")
+	withoutScripts := scriptTagRE.ReplaceAllString(raw, " ")
+	return styleTagRE.ReplaceAllString(withoutScripts, " ")
 }
 
 func stripTags(raw string) string {
-	re := regexp.MustCompile(`(?is)<[^>]+>`)
-	return html.UnescapeString(re.ReplaceAllString(raw, " "))
+	return html.UnescapeString(htmlTagRE.ReplaceAllString(raw, " "))
 }
 
 func normalizeText(text string) string {
-	spaceRE := regexp.MustCompile(`\s+`)
 	return strings.TrimSpace(spaceRE.ReplaceAllString(text, " "))
 }
 
