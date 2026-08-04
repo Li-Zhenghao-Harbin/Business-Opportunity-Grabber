@@ -10,6 +10,10 @@ export function DeleteSite(arg1) {
   return window['go']['main']['App']['DeleteSite'](arg1);
 }
 
+export function GetSchedule() {
+  return window['go']['main']['App']['GetSchedule']();
+}
+
 export function ListOpportunities(arg1) {
   return window['go']['main']['App']['ListOpportunities'](arg1);
 }
@@ -24,6 +28,10 @@ export function ListTasks() {
 
 export function RunCrawl(arg1) {
   return window['go']['main']['App']['RunCrawl'](arg1);
+}
+
+export function SaveSchedule(arg1) {
+  return window['go']['main']['App']['SaveSchedule'](arg1);
 }
 
 export function SaveSite(arg1) {

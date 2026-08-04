@@ -3,16 +3,18 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import {
   Dashboard,
   DeleteSite,
+  GetSchedule,
   ListOpportunities,
   ListSites,
   ListTasks,
   RunCrawl,
+  SaveSchedule,
   SaveSite
 } from '../wailsjs/go/main/App'
 import type { main } from '../wailsjs/go/models'
 import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
 
-type Tab = 'opportunities' | 'sites' | 'tasks'
+type Tab = 'opportunities' | 'sites' | 'schedule' | 'tasks'
 
 const activeTab = ref<Tab>('opportunities')
 const loading = ref(false)
@@ -30,6 +32,13 @@ const sites = ref<main.SiteConfig[]>([])
 const tasks = ref<main.CrawlTask[]>([])
 const opportunities = ref<main.Opportunity[]>([])
 const selectedOpportunity = ref<main.Opportunity | null>(null)
+const savingSchedule = ref(false)
+const schedule = ref<main.ScheduleConfig>({
+  enabled: false,
+  intervalMinutes: 60,
+  lastRunAt: '',
+  nextRunAt: ''
+})
 
 const query = reactive({
   search: '',
@@ -56,6 +65,11 @@ const keywordInput = ref('')
 const regionInput = ref('')
 
 const visibleOpportunities = computed(() => opportunities.value)
+const scheduleStatus = computed(() => {
+  if (!schedule.value.enabled) return '定时抓取未开启'
+  const next = formatDateTime(schedule.value.nextRunAt)
+  return next ? `下次 ${next}` : '等待下次抓取'
+})
 
 function resetSiteForm() {
   Object.assign(siteForm, {
@@ -94,14 +108,16 @@ function splitList(value: string) {
 async function refreshAll() {
   loading.value = true
   try {
-    const [dash, siteList, taskList] = await Promise.all([
+    const [dash, siteList, taskList, scheduleConfig] = await Promise.all([
       Dashboard(),
       ListSites(),
-      ListTasks()
+      ListTasks(),
+      GetSchedule()
     ])
     dashboard.value = dash
     sites.value = siteList
     tasks.value = taskList
+    schedule.value = scheduleConfig
     await refreshOpportunities()
   } finally {
     loading.value = false
@@ -169,6 +185,32 @@ function stopCrawlTimer() {
   if (crawlElapsedTimer) {
     clearInterval(crawlElapsedTimer)
     crawlElapsedTimer = null
+  }
+}
+
+function formatDateTime(value: string) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+async function saveSchedule() {
+  savingSchedule.value = true
+  try {
+    schedule.value = await SaveSchedule({
+      enabled: schedule.value.enabled,
+      intervalMinutes: Number(schedule.value.intervalMinutes) || 60,
+      lastRunAt: schedule.value.lastRunAt,
+      nextRunAt: schedule.value.nextRunAt
+    })
+    message.value = schedule.value.enabled
+      ? `定时抓取已开启：每 ${schedule.value.intervalMinutes} 分钟一次`
+      : '定时抓取已关闭'
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    savingSchedule.value = false
   }
 }
 
@@ -243,16 +285,15 @@ onMounted(refreshAll)
   <main class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="mark">BOG</div>
         <div>
           <h1>商机提取器</h1>
-          <p>Business Opportunity Grabber</p>
         </div>
       </div>
 
       <nav>
         <button :class="{ active: activeTab === 'opportunities' }" @click="activeTab = 'opportunities'">公告库</button>
         <button :class="{ active: activeTab === 'sites' }" @click="activeTab = 'sites'">站点配置</button>
+        <button :class="{ active: activeTab === 'schedule' }" @click="activeTab = 'schedule'">定时抓取</button>
         <button :class="{ active: activeTab === 'tasks' }" @click="activeTab = 'tasks'">任务日志</button>
       </nav>
 
@@ -273,12 +314,15 @@ onMounted(refreshAll)
         <div>
           <h2 v-if="activeTab === 'opportunities'">公告库</h2>
           <h2 v-else-if="activeTab === 'sites'">站点配置</h2>
+          <h2 v-else-if="activeTab === 'schedule'">定时抓取</h2>
           <h2 v-else>任务日志</h2>
           <p>{{ message || '配置目标站点，手动抓取并归档招标采购商机。' }}</p>
         </div>
-        <button class="primary" :disabled="loading" @click="runCrawl">
-          {{ loading ? '处理中...' : '开始抓取' }}
-        </button>
+        <div class="topbar-actions">
+          <button class="primary" :disabled="loading" @click="runCrawl">
+            {{ loading ? '处理中...' : '开始抓取' }}
+          </button>
+        </div>
       </header>
 
       <section v-if="activeTab === 'opportunities'" class="workspace two-column">
@@ -412,6 +456,37 @@ onMounted(refreshAll)
               <button @click="removeSite(site.id)">删除</button>
             </div>
           </article>
+        </div>
+      </section>
+
+      <section v-else-if="activeTab === 'schedule'" class="workspace">
+        <div class="panel schedule-page">
+          <div class="schedule-row">
+            <label class="check">
+              <input v-model="schedule.enabled" type="checkbox" :disabled="savingSchedule" @change="saveSchedule" />
+              启用定时抓取
+            </label>
+            <label>
+              间隔分钟
+              <input
+                v-model.number="schedule.intervalMinutes"
+                min="5"
+                max="1440"
+                step="5"
+                type="number"
+                :disabled="savingSchedule || !schedule.enabled"
+                @change="saveSchedule"
+              />
+            </label>
+          </div>
+          <dl>
+            <dt>状态</dt>
+            <dd>{{ scheduleStatus }}</dd>
+            <dt>上次运行</dt>
+            <dd>{{ formatDateTime(schedule.lastRunAt) || '暂无' }}</dd>
+            <dt>抓取范围</dt>
+            <dd>所有启用站点，最近 7 天</dd>
+          </dl>
         </div>
       </section>
 

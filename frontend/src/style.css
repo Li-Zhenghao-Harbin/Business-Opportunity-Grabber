@@ -84,25 +84,7 @@ label {
   overflow: hidden;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-.mark {
-  display: grid;
-  place-items: center;
-  width: 54px;
-  height: 54px;
-  border-radius: 8px;
-  background: #d8a24a;
-  color: #102b31;
-  font-weight: 800;
-}
-
 .brand h1,
-.brand p,
 .topbar h2,
 .topbar p,
 .panel h3,
@@ -112,12 +94,6 @@ label {
 
 .brand h1 {
   font-size: 20px;
-}
-
-.brand p {
-  margin-top: 4px;
-  color: #c9d7d9;
-  font-size: 12px;
 }
 
 nav {
@@ -179,6 +155,7 @@ nav button.active {
 .topbar {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 20px;
   padding: 18px 20px;
 }
@@ -197,6 +174,29 @@ nav button.active {
   border-color: #2f6f73;
   background: #2f6f73;
   color: #ffffff;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.schedule-page {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.schedule-row {
+  display: grid;
+  grid-template-columns: auto 180px;
+  gap: 14px;
+  align-items: end;
+}
+
+.schedule-row input[type="number"] {
+  max-width: 180px;
 }
 
 .workspace {

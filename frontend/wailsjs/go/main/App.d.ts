@@ -6,6 +6,8 @@ export function Dashboard():Promise<main.Dashboard>;
 
 export function DeleteSite(arg1:string):Promise<void>;
 
+export function GetSchedule():Promise<main.ScheduleConfig>;
+
 export function ListOpportunities(arg1:main.OpportunityQuery):Promise<Array<main.Opportunity>>;
 
 export function ListSites():Promise<Array<main.SiteConfig>>;
@@ -13,5 +15,7 @@ export function ListSites():Promise<Array<main.SiteConfig>>;
 export function ListTasks():Promise<Array<main.CrawlTask>>;
 
 export function RunCrawl(arg1:main.CrawlRequest):Promise<Array<main.CrawlTask>>;
+
+export function SaveSchedule(arg1:main.ScheduleConfig):Promise<main.ScheduleConfig>;
 
 export function SaveSite(arg1:main.SiteConfig):Promise<main.SiteConfig>;

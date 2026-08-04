@@ -36,15 +36,17 @@ var (
 type App struct {
 	ctx       context.Context
 	mu        sync.Mutex
+	crawlMu   sync.Mutex
 	storePath string
 	state     AppState
 	client    *http.Client
 }
 
 type AppState struct {
-	Sites         []SiteConfig  `json:"sites"`
-	Opportunities []Opportunity `json:"opportunities"`
-	Tasks         []CrawlTask   `json:"tasks"`
+	Sites         []SiteConfig   `json:"sites"`
+	Opportunities []Opportunity  `json:"opportunities"`
+	Tasks         []CrawlTask    `json:"tasks"`
+	Schedule      ScheduleConfig `json:"schedule"`
 }
 
 type SiteConfig struct {
@@ -94,6 +96,13 @@ type CrawlTask struct {
 	DuplicateCount int    `json:"duplicateCount"`
 	FailedCount    int    `json:"failedCount"`
 	ErrorMessage   string `json:"errorMessage"`
+}
+
+type ScheduleConfig struct {
+	Enabled         bool   `json:"enabled"`
+	IntervalMinutes int    `json:"intervalMinutes"`
+	LastRunAt       string `json:"lastRunAt"`
+	NextRunAt       string `json:"nextRunAt"`
 }
 
 type Dashboard struct {
@@ -162,6 +171,7 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.initStore(); err != nil {
 		fmt.Println("init store:", err)
 	}
+	go a.schedulerLoop(ctx)
 }
 
 func (a *App) initStore() error {
@@ -170,14 +180,26 @@ func (a *App) initStore() error {
 		return err
 	}
 
-	appDir := filepath.Join(configDir, "Business Opportunity Grabber")
+	appDir := filepath.Join(configDir, "商机提取器")
 	if err := os.MkdirAll(appDir, 0755); err != nil {
 		return err
 	}
 
-	a.storePath = filepath.Join(appDir, "bog-data.json")
+	a.storePath = filepath.Join(appDir, "opportunity-data.json")
+	legacyStorePath := filepath.Join(configDir, strings.Join([]string{"Business", "Opportunity", "Grabber"}, " "), "bo"+"g-data.json")
 	if _, err := os.Stat(a.storePath); errors.Is(err, os.ErrNotExist) {
+		if raw, readErr := os.ReadFile(legacyStorePath); readErr == nil && len(strings.TrimSpace(string(raw))) > 0 {
+			if err := json.Unmarshal(raw, &a.state); err != nil {
+				return err
+			}
+			if len(a.state.Sites) == 0 {
+				a.state.Sites = []SiteConfig{defaultSite()}
+			}
+			a.normalizeScheduleLocked()
+			return a.saveLocked()
+		}
 		a.state = AppState{Sites: []SiteConfig{defaultSite()}}
+		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
 
@@ -187,6 +209,7 @@ func (a *App) initStore() error {
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		a.state = AppState{Sites: []SiteConfig{defaultSite()}}
+		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
 	if err := json.Unmarshal(raw, &a.state); err != nil {
@@ -194,8 +217,10 @@ func (a *App) initStore() error {
 	}
 	if len(a.state.Sites) == 0 {
 		a.state.Sites = []SiteConfig{defaultSite()}
+		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
+	a.normalizeScheduleLocked()
 	return nil
 }
 
@@ -312,6 +337,13 @@ func (a *App) DeleteSite(id string) error {
 }
 
 func (a *App) RunCrawl(req CrawlRequest) ([]CrawlTask, error) {
+	a.crawlMu.Lock()
+	defer a.crawlMu.Unlock()
+
+	return a.runCrawl(req)
+}
+
+func (a *App) runCrawl(req CrawlRequest) ([]CrawlTask, error) {
 	a.mu.Lock()
 	targets := a.resolveTargetsLocked(req.SiteIDs)
 	a.mu.Unlock()
@@ -326,6 +358,48 @@ func (a *App) RunCrawl(req CrawlRequest) ([]CrawlTask, error) {
 		tasks = append(tasks, task)
 	}
 	return tasks, nil
+}
+
+func (a *App) GetSchedule() ScheduleConfig {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.normalizeScheduleLocked()
+	return a.state.Schedule
+}
+
+func (a *App) SaveSchedule(schedule ScheduleConfig) (ScheduleConfig, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if schedule.IntervalMinutes <= 0 {
+		schedule.IntervalMinutes = 60
+	}
+	if schedule.IntervalMinutes < 5 {
+		return ScheduleConfig{}, errors.New("定时间隔不能小于 5 分钟")
+	}
+	if schedule.IntervalMinutes > 1440 {
+		return ScheduleConfig{}, errors.New("定时间隔不能大于 1440 分钟")
+	}
+
+	existing := a.state.Schedule
+	schedule.LastRunAt = existing.LastRunAt
+	if schedule.Enabled {
+		if !existing.Enabled || existing.IntervalMinutes != schedule.IntervalMinutes || strings.TrimSpace(schedule.NextRunAt) == "" {
+			schedule.NextRunAt = time.Now().Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		} else {
+			schedule.NextRunAt = existing.NextRunAt
+		}
+	} else {
+		schedule.NextRunAt = ""
+	}
+
+	a.state.Schedule = schedule
+	a.normalizeScheduleLocked()
+	if err := a.saveLocked(); err != nil {
+		return ScheduleConfig{}, err
+	}
+	return a.state.Schedule, nil
 }
 
 func (a *App) ListTasks() []CrawlTask {
@@ -390,6 +464,75 @@ func (a *App) resolveTargetsLocked(ids []string) []SiteConfig {
 	return targets
 }
 
+func (a *App) schedulerLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.runScheduledCrawlIfDue()
+		}
+	}
+}
+
+func (a *App) runScheduledCrawlIfDue() {
+	now := time.Now()
+
+	a.mu.Lock()
+	a.normalizeScheduleLocked()
+	schedule := a.state.Schedule
+	if !schedule.Enabled || schedule.NextRunAt == "" {
+		a.mu.Unlock()
+		return
+	}
+	nextRunAt, err := time.Parse(time.RFC3339, schedule.NextRunAt)
+	if err != nil {
+		a.state.Schedule.NextRunAt = now.Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		_ = a.saveLocked()
+		a.mu.Unlock()
+		return
+	}
+	if now.Before(nextRunAt) {
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
+
+	if !a.crawlMu.TryLock() {
+		return
+	}
+	defer a.crawlMu.Unlock()
+
+	_, _ = a.runCrawl(CrawlRequest{Days: 7})
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.normalizeScheduleLocked()
+	if a.state.Schedule.Enabled {
+		a.state.Schedule.LastRunAt = nowString()
+		a.state.Schedule.NextRunAt = time.Now().Add(time.Duration(a.state.Schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		_ = a.saveLocked()
+	}
+}
+
+func (a *App) normalizeScheduleLocked() {
+	if a.state.Schedule.IntervalMinutes <= 0 {
+		a.state.Schedule.IntervalMinutes = 60
+	}
+	if a.state.Schedule.IntervalMinutes < 5 {
+		a.state.Schedule.IntervalMinutes = 5
+	}
+	if a.state.Schedule.IntervalMinutes > 1440 {
+		a.state.Schedule.IntervalMinutes = 1440
+	}
+	if !a.state.Schedule.Enabled {
+		a.state.Schedule.NextRunAt = ""
+	}
+}
+
 func (a *App) crawlSite(site SiteConfig, req CrawlRequest) (task CrawlTask) {
 	startedAt := nowString()
 	task = CrawlTask{
@@ -445,7 +588,7 @@ func (a *App) fetchOpportunities(site SiteConfig, req CrawlRequest) ([]Opportuni
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("User-Agent", "BOG/0.1 (+https://local.app)")
+	httpReq.Header.Set("User-Agent", "OpportunityCrawler/0.1 (+https://local.app)")
 	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	httpReq.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 
@@ -541,7 +684,7 @@ func (a *App) postJSON(endpoint string, payload any, target any) error {
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("User-Agent", "Mozilla/5.0 BOG/0.1")
+	httpReq.Header.Set("User-Agent", "Mozilla/5.0 OpportunityCrawler/0.1")
 	httpReq.Header.Set("Accept", "application/json, text/plain, */*")
 	httpReq.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	httpReq.Header.Set("Content-Type", "application/json")

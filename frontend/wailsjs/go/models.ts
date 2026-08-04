@@ -122,6 +122,24 @@ export namespace main {
 	        this.siteId = source["siteId"];
 	    }
 	}
+	export class ScheduleConfig {
+	    enabled: boolean;
+	    intervalMinutes: number;
+	    lastRunAt: string;
+	    nextRunAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ScheduleConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.intervalMinutes = source["intervalMinutes"];
+	        this.lastRunAt = source["lastRunAt"];
+	        this.nextRunAt = source["nextRunAt"];
+	    }
+	}
 	export class SiteConfig {
 	    id: string;
 	    name: string;
