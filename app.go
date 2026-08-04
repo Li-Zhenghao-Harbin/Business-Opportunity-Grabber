@@ -585,12 +585,16 @@ func sgccNoticeToOpportunity(notice sgccNotice, site SiteConfig, req CrawlReques
 		noticeID = jsonValueString(notice.ID)
 	}
 	docID := jsonValueString(notice.FirstPageDocID)
+	routeDocID := noticeID
+	if routeDocID == "" {
+		routeDocID = docID
+	}
 	menuID := jsonValueString(notice.FirstPageMenuID)
 	if menuID == "" {
 		menuID = sgccListSpeMenuID
 	}
 	status := sgccProjectStatus(jsonValueString(notice.PrjStatus))
-	sourceURL := sgccContentURL(docID, menuID)
+	sourceURL := sgccContentURL(routeDocID, menuID, notice.DocType, notice.Title)
 	content := strings.Join(cleanList([]string{
 		"项目名称：" + notice.Title,
 		"项目编号：" + notice.Code,
@@ -621,11 +625,15 @@ func sgccNoticeToOpportunity(notice sgccNotice, site SiteConfig, req CrawlReques
 	return item
 }
 
-func sgccContentURL(docID string, menuID string) string {
+func sgccContentURL(docID string, menuID string, docType string, title string) string {
 	if docID == "" {
 		return defaultSGCCURL
 	}
-	return fmt.Sprintf("https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/content/%s_1_%s?docId=%s_%s", menuID, menuID, docID, menuID)
+	docType = strings.TrimSpace(docType)
+	if docType == "" {
+		docType = inferSGCCDocType(title)
+	}
+	return fmt.Sprintf("https://ecp.sgcc.com.cn/ecp2.0/portal/#/doc/%s/%s_%s", docType, docID, menuID)
 }
 
 func inferSGCCNoticeType(notice sgccNotice) string {
@@ -638,6 +646,15 @@ func inferSGCCNoticeType(notice sgccNotice) string {
 		}
 	}
 	return inferNoticeType(notice.Title)
+}
+
+func inferSGCCDocType(title string) string {
+	switch {
+	case strings.Contains(title, "变更") || strings.Contains(title, "澄清"):
+		return "doci-change"
+	default:
+		return "doci-bid"
+	}
 }
 
 func sgccProjectStatus(value string) string {
