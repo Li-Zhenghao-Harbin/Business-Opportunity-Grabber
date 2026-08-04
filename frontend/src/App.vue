@@ -8,10 +8,10 @@ import {
   ListTasks,
   RunCrawl,
   SaveRemark,
-  SaveSite,
-  ToggleFavorite
+  SaveSite
 } from '../wailsjs/go/main/App'
 import type { main } from '../wailsjs/go/models'
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
 
 type Tab = 'opportunities' | 'sites' | 'tasks'
 
@@ -25,7 +25,6 @@ const dashboard = ref<main.Dashboard>({
   siteCount: 0,
   enabledSiteCount: 0,
   opportunityCount: 0,
-  favoriteCount: 0,
   lastTaskCount: 0
 })
 const sites = ref<main.SiteConfig[]>([])
@@ -36,7 +35,6 @@ const selectedOpportunity = ref<main.Opportunity | null>(null)
 const query = reactive({
   search: '',
   siteId: '',
-  onlyFavorite: false,
   onlyWithMatch: false
 })
 
@@ -126,7 +124,6 @@ async function refreshOpportunities() {
   opportunities.value = await ListOpportunities({
     search: query.search,
     siteId: query.siteId,
-    onlyFavorite: query.onlyFavorite,
     onlyWithMatch: query.onlyWithMatch
   })
   if (selectedOpportunity.value) {
@@ -248,13 +245,6 @@ function selectOpportunity(item: main.Opportunity) {
   remarkDraft.value = item.remark || ''
 }
 
-async function toggleFavorite(item: main.Opportunity) {
-  const updated = await ToggleFavorite(item.id)
-  Object.assign(item, updated)
-  if (selectedOpportunity.value?.id === item.id) selectedOpportunity.value = updated
-  await refreshAll()
-}
-
 async function saveRemark() {
   if (!selectedOpportunity.value) return
   const updated = await SaveRemark(selectedOpportunity.value.id, remarkDraft.value)
@@ -265,7 +255,7 @@ async function saveRemark() {
 
 function openSource(url: string) {
   if (!url) return
-  window.open(url, '_blank')
+  BrowserOpenURL(url)
 }
 
 onMounted(refreshAll)
@@ -296,10 +286,6 @@ onMounted(refreshAll)
         <div>
           <strong>{{ dashboard.enabledSiteCount }}/{{ dashboard.siteCount }}</strong>
           <span>启用站点</span>
-        </div>
-        <div>
-          <strong>{{ dashboard.favoriteCount }}</strong>
-          <span>收藏</span>
         </div>
       </section>
     </aside>
@@ -343,10 +329,6 @@ onMounted(refreshAll)
               <option v-for="site in sites" :key="site.id" :value="site.id">{{ site.name }}</option>
             </select>
             <label class="check">
-              <input v-model="query.onlyFavorite" type="checkbox" @change="refreshOpportunities" />
-              收藏
-            </label>
-            <label class="check">
               <input v-model="query.onlyWithMatch" type="checkbox" @change="refreshOpportunities" />
               命中关键词
             </label>
@@ -364,7 +346,6 @@ onMounted(refreshAll)
                 <h3>{{ item.title }}</h3>
                 <p>{{ item.sourceSite }} · {{ item.noticeType || '公告' }} · {{ item.publishTime || '未知时间' }}</p>
               </div>
-              <button class="icon" title="收藏" @click.stop="toggleFavorite(item)">{{ item.isFavorite ? '★' : '☆' }}</button>
               <div v-if="item.matchedKeywords?.length" class="tags">
                 <span v-for="keyword in item.matchedKeywords" :key="keyword">{{ keyword }}</span>
               </div>

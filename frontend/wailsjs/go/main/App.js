@@ -33,7 +33,3 @@ export function SaveRemark(arg1, arg2) {
 export function SaveSite(arg1) {
   return window['go']['main']['App']['SaveSite'](arg1);
 }
-
-export function ToggleFavorite(arg1) {
-  return window['go']['main']['App']['ToggleFavorite'](arg1);
-}

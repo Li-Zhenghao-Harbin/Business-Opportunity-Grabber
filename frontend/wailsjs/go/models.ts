@@ -52,7 +52,6 @@ export namespace main {
 	    siteCount: number;
 	    enabledSiteCount: number;
 	    opportunityCount: number;
-	    favoriteCount: number;
 	    lastTaskCount: number;
 	
 	    static createFrom(source: any = {}) {
@@ -64,7 +63,6 @@ export namespace main {
 	        this.siteCount = source["siteCount"];
 	        this.enabledSiteCount = source["enabledSiteCount"];
 	        this.opportunityCount = source["opportunityCount"];
-	        this.favoriteCount = source["favoriteCount"];
 	        this.lastTaskCount = source["lastTaskCount"];
 	    }
 	}
@@ -82,7 +80,6 @@ export namespace main {
 	    sourceUrl: string;
 	    content: string;
 	    matchedKeywords: string[];
-	    isFavorite: boolean;
 	    remark: string;
 	    contentHash: string;
 	    createdAt: string;
@@ -107,7 +104,6 @@ export namespace main {
 	        this.sourceUrl = source["sourceUrl"];
 	        this.content = source["content"];
 	        this.matchedKeywords = source["matchedKeywords"];
-	        this.isFavorite = source["isFavorite"];
 	        this.remark = source["remark"];
 	        this.contentHash = source["contentHash"];
 	        this.createdAt = source["createdAt"];
@@ -117,7 +113,6 @@ export namespace main {
 	export class OpportunityQuery {
 	    search: string;
 	    siteId: string;
-	    onlyFavorite: boolean;
 	    onlyWithMatch: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -128,7 +123,6 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.search = source["search"];
 	        this.siteId = source["siteId"];
-	        this.onlyFavorite = source["onlyFavorite"];
 	        this.onlyWithMatch = source["onlyWithMatch"];
 	    }
 	}

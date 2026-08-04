@@ -77,7 +77,6 @@ type Opportunity struct {
 	SourceURL       string   `json:"sourceUrl"`
 	Content         string   `json:"content"`
 	MatchedKeywords []string `json:"matchedKeywords"`
-	IsFavorite      bool     `json:"isFavorite"`
 	Remark          string   `json:"remark"`
 	ContentHash     string   `json:"contentHash"`
 	CreatedAt       string   `json:"createdAt"`
@@ -102,7 +101,6 @@ type Dashboard struct {
 	SiteCount        int `json:"siteCount"`
 	EnabledSiteCount int `json:"enabledSiteCount"`
 	OpportunityCount int `json:"opportunityCount"`
-	FavoriteCount    int `json:"favoriteCount"`
 	LastTaskCount    int `json:"lastTaskCount"`
 }
 
@@ -115,7 +113,6 @@ type CrawlRequest struct {
 type OpportunityQuery struct {
 	Search        string `json:"search"`
 	SiteID        string `json:"siteId"`
-	OnlyFavorite  bool   `json:"onlyFavorite"`
 	OnlyWithMatch bool   `json:"onlyWithMatch"`
 }
 
@@ -227,22 +224,16 @@ func (a *App) Dashboard() Dashboard {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	var enabled, favorites int
+	var enabled int
 	for _, site := range a.state.Sites {
 		if site.Enabled {
 			enabled++
-		}
-	}
-	for _, item := range a.state.Opportunities {
-		if item.IsFavorite {
-			favorites++
 		}
 	}
 	return Dashboard{
 		SiteCount:        len(a.state.Sites),
 		EnabledSiteCount: enabled,
 		OpportunityCount: len(a.state.Opportunities),
-		FavoriteCount:    favorites,
 		LastTaskCount:    len(a.state.Tasks),
 	}
 }
@@ -360,9 +351,6 @@ func (a *App) ListOpportunities(query OpportunityQuery) []Opportunity {
 		if query.SiteID != "" && item.SiteID != query.SiteID {
 			continue
 		}
-		if query.OnlyFavorite && !item.IsFavorite {
-			continue
-		}
 		if query.OnlyWithMatch && len(item.MatchedKeywords) == 0 {
 			continue
 		}
@@ -386,20 +374,6 @@ func (a *App) ListOpportunities(query OpportunityQuery) []Opportunity {
 		return left > right
 	})
 	return items
-}
-
-func (a *App) ToggleFavorite(id string) (Opportunity, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	for i := range a.state.Opportunities {
-		if a.state.Opportunities[i].ID == id {
-			a.state.Opportunities[i].IsFavorite = !a.state.Opportunities[i].IsFavorite
-			a.state.Opportunities[i].UpdatedAt = nowString()
-			return a.state.Opportunities[i], a.saveLocked()
-		}
-	}
-	return Opportunity{}, errors.New("未找到公告")
 }
 
 func (a *App) SaveRemark(id string, remark string) (Opportunity, error) {
@@ -821,7 +795,6 @@ func (a *App) upsertOpportunities(items []Opportunity) (int, int) {
 		key := dedupeKey(item)
 		if existingIndex, ok := index[key]; ok {
 			existing := a.state.Opportunities[existingIndex]
-			item.IsFavorite = existing.IsFavorite
 			item.Remark = existing.Remark
 			item.CreatedAt = existing.CreatedAt
 			item.UpdatedAt = nowString()
