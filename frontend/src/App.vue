@@ -7,7 +7,6 @@ import {
   ListSites,
   ListTasks,
   RunCrawl,
-  SaveRemark,
   SaveSite
 } from '../wailsjs/go/main/App'
 import type { main } from '../wailsjs/go/models'
@@ -34,14 +33,7 @@ const selectedOpportunity = ref<main.Opportunity | null>(null)
 
 const query = reactive({
   search: '',
-  siteId: '',
-  onlyWithMatch: false
-})
-
-const crawlForm = reactive({
-  siteIds: [] as string[],
-  keyword: '',
-  days: 7
+  siteId: ''
 })
 
 const siteForm = reactive<main.SiteConfig>({
@@ -62,7 +54,6 @@ const siteForm = reactive<main.SiteConfig>({
 
 const keywordInput = ref('')
 const regionInput = ref('')
-const remarkDraft = ref('')
 
 const visibleOpportunities = computed(() => opportunities.value)
 
@@ -112,9 +103,6 @@ async function refreshAll() {
     sites.value = siteList
     tasks.value = taskList
     await refreshOpportunities()
-    if (crawlForm.siteIds.length === 0) {
-      crawlForm.siteIds = siteList.filter((site) => site.enabled).map((site) => site.id)
-    }
   } finally {
     loading.value = false
   }
@@ -123,8 +111,7 @@ async function refreshAll() {
 async function refreshOpportunities() {
   opportunities.value = await ListOpportunities({
     search: query.search,
-    siteId: query.siteId,
-    onlyWithMatch: query.onlyWithMatch
+    siteId: query.siteId
   })
   if (selectedOpportunity.value) {
     selectedOpportunity.value =
@@ -223,9 +210,9 @@ async function runCrawl() {
   try {
     const result = await withTimeout(
       RunCrawl({
-        siteIds: crawlForm.siteIds,
-        keyword: crawlForm.keyword,
-        days: Number(crawlForm.days) || 7
+        siteIds: sites.value.filter((site) => site.enabled).map((site) => site.id),
+        keyword: '',
+        days: 7
       }),
       crawlTimeoutMs,
       '抓取超过 60 秒仍未返回，请到任务日志查看是否有长时间运行或失败的站点。'
@@ -242,15 +229,6 @@ async function runCrawl() {
 
 function selectOpportunity(item: main.Opportunity) {
   selectedOpportunity.value = item
-  remarkDraft.value = item.remark || ''
-}
-
-async function saveRemark() {
-  if (!selectedOpportunity.value) return
-  const updated = await SaveRemark(selectedOpportunity.value.id, remarkDraft.value)
-  selectedOpportunity.value = updated
-  await refreshAll()
-  message.value = '备注已保存'
 }
 
 function openSource(url: string) {
@@ -303,23 +281,6 @@ onMounted(refreshAll)
         </button>
       </header>
 
-      <section class="crawl-panel">
-        <label>
-          抓取站点
-          <select v-model="crawlForm.siteIds" multiple>
-            <option v-for="site in sites" :key="site.id" :value="site.id">{{ site.name }}</option>
-          </select>
-        </label>
-        <label>
-          临时关键词
-          <input v-model="crawlForm.keyword" placeholder="如：变电站、信息化、施工" />
-        </label>
-        <label>
-          最近天数
-          <input v-model.number="crawlForm.days" min="1" type="number" />
-        </label>
-      </section>
-
       <section v-if="activeTab === 'opportunities'" class="workspace two-column">
         <div class="panel">
           <div class="toolbar">
@@ -328,10 +289,6 @@ onMounted(refreshAll)
               <option value="">全部站点</option>
               <option v-for="site in sites" :key="site.id" :value="site.id">{{ site.name }}</option>
             </select>
-            <label class="check">
-              <input v-model="query.onlyWithMatch" type="checkbox" @change="refreshOpportunities" />
-              命中关键词
-            </label>
           </div>
 
           <div class="list">
@@ -377,11 +334,6 @@ onMounted(refreshAll)
               <dd>{{ selectedOpportunity.deadline || '未识别' }}</dd>
             </dl>
             <p class="content-text">{{ selectedOpportunity.content }}</p>
-            <label>
-              备注
-              <textarea v-model="remarkDraft" rows="5" placeholder="记录跟进人、判断依据或下一步动作"></textarea>
-            </label>
-            <button class="primary" @click="saveRemark">保存备注</button>
           </template>
           <div v-else class="empty">选择一条公告查看详情。</div>
         </aside>
@@ -411,7 +363,7 @@ onMounted(refreshAll)
               抓取模式
               <select v-model="siteForm.renderMode">
                 <option value="http">HTTP 静态抓取</option>
-                <option value="browser">浏览器渲染预留</option>
+                <option value="browser">浏览器渲染（未启用）</option>
               </select>
             </label>
           </div>

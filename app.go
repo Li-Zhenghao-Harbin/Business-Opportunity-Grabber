@@ -77,7 +77,6 @@ type Opportunity struct {
 	SourceURL       string   `json:"sourceUrl"`
 	Content         string   `json:"content"`
 	MatchedKeywords []string `json:"matchedKeywords"`
-	Remark          string   `json:"remark"`
 	ContentHash     string   `json:"contentHash"`
 	CreatedAt       string   `json:"createdAt"`
 	UpdatedAt       string   `json:"updatedAt"`
@@ -111,9 +110,8 @@ type CrawlRequest struct {
 }
 
 type OpportunityQuery struct {
-	Search        string `json:"search"`
-	SiteID        string `json:"siteId"`
-	OnlyWithMatch bool   `json:"onlyWithMatch"`
+	Search string `json:"search"`
+	SiteID string `json:"siteId"`
 }
 
 type sgccNoteListRequest struct {
@@ -351,9 +349,6 @@ func (a *App) ListOpportunities(query OpportunityQuery) []Opportunity {
 		if query.SiteID != "" && item.SiteID != query.SiteID {
 			continue
 		}
-		if query.OnlyWithMatch && len(item.MatchedKeywords) == 0 {
-			continue
-		}
 		if search != "" {
 			haystack := strings.ToLower(item.Title + " " + item.Content + " " + item.SourceSite + " " + item.NoticeType)
 			if !strings.Contains(haystack, search) {
@@ -374,20 +369,6 @@ func (a *App) ListOpportunities(query OpportunityQuery) []Opportunity {
 		return left > right
 	})
 	return items
-}
-
-func (a *App) SaveRemark(id string, remark string) (Opportunity, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	for i := range a.state.Opportunities {
-		if a.state.Opportunities[i].ID == id {
-			a.state.Opportunities[i].Remark = strings.TrimSpace(remark)
-			a.state.Opportunities[i].UpdatedAt = nowString()
-			return a.state.Opportunities[i], a.saveLocked()
-		}
-	}
-	return Opportunity{}, errors.New("未找到公告")
 }
 
 func (a *App) resolveTargetsLocked(ids []string) []SiteConfig {
@@ -812,7 +793,6 @@ func (a *App) upsertOpportunities(items []Opportunity) (int, int) {
 		key := dedupeKey(item)
 		if existingIndex, ok := index[key]; ok {
 			existing := a.state.Opportunities[existingIndex]
-			item.Remark = existing.Remark
 			item.CreatedAt = existing.CreatedAt
 			item.UpdatedAt = nowString()
 			a.state.Opportunities[existingIndex] = item

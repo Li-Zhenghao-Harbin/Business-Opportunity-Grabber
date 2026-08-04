@@ -80,7 +80,6 @@ export namespace main {
 	    sourceUrl: string;
 	    content: string;
 	    matchedKeywords: string[];
-	    remark: string;
 	    contentHash: string;
 	    createdAt: string;
 	    updatedAt: string;
@@ -104,7 +103,6 @@ export namespace main {
 	        this.sourceUrl = source["sourceUrl"];
 	        this.content = source["content"];
 	        this.matchedKeywords = source["matchedKeywords"];
-	        this.remark = source["remark"];
 	        this.contentHash = source["contentHash"];
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
@@ -113,7 +111,6 @@ export namespace main {
 	export class OpportunityQuery {
 	    search: string;
 	    siteId: string;
-	    onlyWithMatch: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new OpportunityQuery(source);
@@ -123,7 +120,6 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.search = source["search"];
 	        this.siteId = source["siteId"];
-	        this.onlyWithMatch = source["onlyWithMatch"];
 	    }
 	}
 	export class SiteConfig {

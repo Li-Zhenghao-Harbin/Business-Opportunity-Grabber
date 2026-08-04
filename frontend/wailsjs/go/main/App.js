@@ -26,10 +26,6 @@ export function RunCrawl(arg1) {
   return window['go']['main']['App']['RunCrawl'](arg1);
 }
 
-export function SaveRemark(arg1, arg2) {
-  return window['go']['main']['App']['SaveRemark'](arg1, arg2);
-}
-
 export function SaveSite(arg1) {
   return window['go']['main']['App']['SaveSite'](arg1);
 }

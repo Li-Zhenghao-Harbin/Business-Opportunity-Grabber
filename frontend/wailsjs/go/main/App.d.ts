@@ -14,6 +14,4 @@ export function ListTasks():Promise<Array<main.CrawlTask>>;
 
 export function RunCrawl(arg1:main.CrawlRequest):Promise<Array<main.CrawlTask>>;
 
-export function SaveRemark(arg1:string,arg2:string):Promise<main.Opportunity>;
-
 export function SaveSite(arg1:main.SiteConfig):Promise<main.SiteConfig>;

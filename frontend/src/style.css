@@ -72,12 +72,16 @@ label {
 }
 
 .sidebar {
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
   gap: 24px;
+  height: 100vh;
   padding: 26px 20px;
   color: #f8fafc;
   background: #12343b;
+  overflow: hidden;
 }
 
 .brand {
@@ -159,14 +163,13 @@ nav button.active {
 
 .content {
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto 1fr;
   gap: 16px;
   padding: 24px;
   min-width: 0;
 }
 
 .topbar,
-.crawl-panel,
 .panel {
   border: 1px solid #d7dee8;
   border-radius: 8px;
@@ -196,13 +199,6 @@ nav button.active {
   color: #ffffff;
 }
 
-.crawl-panel {
-  display: grid;
-  grid-template-columns: 2fr 2fr 140px;
-  gap: 14px;
-  padding: 16px;
-}
-
 .workspace {
   min-height: 0;
 }
@@ -221,7 +217,7 @@ nav button.active {
 
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 190px auto auto;
+  grid-template-columns: minmax(220px, 1fr) 190px;
   gap: 10px;
   align-items: center;
   margin-bottom: 14px;
