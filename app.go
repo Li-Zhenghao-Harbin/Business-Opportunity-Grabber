@@ -22,6 +22,7 @@ import (
 )
 
 const defaultSGCCURL = "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe"
+const defaultCSGURL = "https://www.bidding.csg.cn/zbcg/index.jhtml"
 const crawlRequestTimeout = 30 * time.Second
 const sgccNoticeListURL = "https://ecp.sgcc.com.cn/ecp2.0/ecpwcmcore/index/noteList"
 const sgccListSpeMenuID = "2018032700291334"
@@ -192,13 +193,11 @@ func (a *App) initStore() error {
 			if err := json.Unmarshal(raw, &a.state); err != nil {
 				return err
 			}
-			if len(a.state.Sites) == 0 {
-				a.state.Sites = []SiteConfig{defaultSite()}
-			}
+			a.ensureBuiltInSitesLocked()
 			a.normalizeScheduleLocked()
 			return a.saveLocked()
 		}
-		a.state = AppState{Sites: []SiteConfig{defaultSite()}}
+		a.state = AppState{Sites: defaultSites()}
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
@@ -208,15 +207,16 @@ func (a *App) initStore() error {
 		return err
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		a.state = AppState{Sites: []SiteConfig{defaultSite()}}
+		a.state = AppState{Sites: defaultSites()}
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
 	if err := json.Unmarshal(raw, &a.state); err != nil {
 		return err
 	}
-	if len(a.state.Sites) == 0 {
-		a.state.Sites = []SiteConfig{defaultSite()}
+	siteCount := len(a.state.Sites)
+	a.ensureBuiltInSitesLocked()
+	if len(a.state.Sites) != siteCount {
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
@@ -224,7 +224,31 @@ func (a *App) initStore() error {
 	return nil
 }
 
-func defaultSite() SiteConfig {
+func defaultSites() []SiteConfig {
+	return []SiteConfig{defaultSGCCSite(), defaultCSGSite()}
+}
+
+func (a *App) ensureBuiltInSitesLocked() {
+	if len(a.state.Sites) == 0 {
+		a.state.Sites = defaultSites()
+		return
+	}
+
+	for _, builtIn := range defaultSites() {
+		exists := false
+		for _, site := range a.state.Sites {
+			if site.ID == builtIn.ID || strings.EqualFold(site.BaseURL, builtIn.BaseURL) {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			a.state.Sites = append(a.state.Sites, builtIn)
+		}
+	}
+}
+
+func defaultSGCCSite() SiteConfig {
 	now := nowString()
 	return SiteConfig{
 		ID:            "sgcc-list-spe",
@@ -234,6 +258,25 @@ func defaultSite() SiteConfig {
 		Enabled:       true,
 		RenderMode:    "http",
 		Keywords:      []string{"招标", "采购", "项目", "电网"},
+		Regions:       []string{},
+		DateRangeDays: 7,
+		MinIntervalMS: 1500,
+		MaxRetries:    3,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+}
+
+func defaultCSGSite() SiteConfig {
+	now := nowString()
+	return SiteConfig{
+		ID:            "csg-zbcg",
+		Name:          "南方电网 - 采购公告",
+		SiteType:      "csg",
+		BaseURL:       defaultCSGURL,
+		Enabled:       true,
+		RenderMode:    "http",
+		Keywords:      []string{"招标", "采购", "公告", "南方电网"},
 		Regions:       []string{},
 		DateRangeDays: 7,
 		MinIntervalMS: 1500,
@@ -580,6 +623,9 @@ func (a *App) fetchOpportunities(site SiteConfig, req CrawlRequest) ([]Opportuni
 	if site.SiteType == "sgcc" || strings.Contains(site.BaseURL, "ecp.sgcc.com.cn") {
 		return a.fetchSGCCOpportunities(site, req)
 	}
+	if site.SiteType == "csg" || strings.Contains(site.BaseURL, "bidding.csg.cn") {
+		return a.fetchCSGOpportunities(site, req)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), crawlRequestTimeout)
 	defer cancel()
@@ -623,6 +669,41 @@ func (a *App) fetchOpportunities(site SiteConfig, req CrawlRequest) ([]Opportuni
 		item.ContentHash = makeID(item.SourceURL + item.Title + item.Content)
 		item.MatchedKeywords = matchKeywords(item.Title+" "+item.Content, site, req)
 		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (a *App) fetchCSGOpportunities(site SiteConfig, req CrawlRequest) ([]Opportunity, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), crawlRequestTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, site.BaseURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("User-Agent", "Mozilla/5.0 OpportunityCrawler/0.1")
+	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	httpReq.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	httpReq.Header.Set("Referer", "https://www.bidding.csg.cn/")
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("访问失败：HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return nil, err
+	}
+
+	items := parseCSGHTMLForOpportunities(string(body), site, req)
+	if len(items) == 0 {
+		return nil, errors.New("南方电网页面已访问，但未识别出采购公告列表")
 	}
 	return items, nil
 }
@@ -874,6 +955,126 @@ func parseHTMLForOpportunities(raw string, site SiteConfig, req CrawlRequest) []
 		}
 	}
 	return items
+}
+
+func parseCSGHTMLForOpportunities(raw string, site SiteConfig, req CrawlRequest) []Opportunity {
+	cleaned := stripScripts(raw)
+	linkRE := regexp.MustCompile(`(?is)<a\b[^>]*href=["']?([^"'\s>]+)["']?[^>]*>(.*?)</a>`)
+	dateRE := regexp.MustCompile(`\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}`)
+	tenderRE := regexp.MustCompile(`(?i)(?:项目编号|招标编号|采购编号|编号)[:：\s]*([A-Z0-9_\-./]+)`)
+	orgRE := regexp.MustCompile(`(?s)([^|<>]{2,80}(?:公司|有限责任公司|有限公司|供应链集团|供应链科技|电网公司|电网有限责任公司))\s*(?:&nbsp;|\xc2\xa0|\s)*\|`)
+
+	base, _ := url.Parse(site.BaseURL)
+	cutoff := time.Time{}
+	if req.Days > 0 {
+		cutoff = time.Now().AddDate(0, 0, -req.Days)
+	}
+
+	seen := map[string]bool{}
+	var items []Opportunity
+	matches := linkRE.FindAllStringSubmatch(cleaned, -1)
+	for _, match := range matches {
+		href := html.UnescapeString(strings.TrimSpace(match[1]))
+		sourceURL := resolveURL(base, href)
+		if !isCSGNoticeURL(sourceURL) {
+			continue
+		}
+
+		title := normalizeCSGTitle(linkTitle(match[0], stripTags(match[2])))
+		if !looksLikeNotice(title) {
+			continue
+		}
+
+		key := sourceURL + "|" + title
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		contextText := contextAround(cleaned, match[0])
+		content := normalizeText(stripTags(contextText))
+		publishTime := ""
+		if date := dateRE.FindString(contextText); date != "" {
+			publishTime = normalizeDate(date)
+		}
+		if !cutoff.IsZero() && publishTime != "" {
+			publishedAt, err := time.Parse("2006-01-02", publishTime)
+			if err == nil && publishedAt.Before(cutoff) {
+				continue
+			}
+		}
+
+		buyer := ""
+		if buyerMatch := orgRE.FindStringSubmatch(content); len(buyerMatch) > 1 {
+			buyer = normalizeText(stripTags(buyerMatch[1]))
+		}
+		tenderNo := ""
+		if tender := tenderRE.FindStringSubmatch(content); len(tender) > 1 {
+			tenderNo = tender[1]
+		} else if bracketNo := extractBracketTenderNo(title); bracketNo != "" {
+			tenderNo = bracketNo
+		}
+
+		item := Opportunity{
+			ID:              makeID(site.ID + sourceURL + title),
+			SiteID:          site.ID,
+			SourceSite:      site.Name,
+			Title:           title,
+			NoticeType:      inferNoticeType(title + " " + content),
+			PublishTime:     publishTime,
+			TenderNo:        tenderNo,
+			Buyer:           buyer,
+			SourceURL:       sourceURL,
+			Content:         content,
+			MatchedKeywords: matchKeywords(title+" "+content, site, req),
+			ContentHash:     makeID(sourceURL + title + content),
+			CreatedAt:       nowString(),
+			UpdatedAt:       nowString(),
+		}
+		items = append(items, item)
+		if len(items) >= 100 {
+			break
+		}
+	}
+	return items
+}
+
+func isCSGNoticeURL(sourceURL string) bool {
+	parsed, err := url.Parse(sourceURL)
+	if err != nil {
+		return false
+	}
+	if !strings.Contains(parsed.Host, "bidding.csg.cn") {
+		return false
+	}
+	path := parsed.EscapedPath()
+	if !strings.HasSuffix(path, ".jhtml") || strings.Contains(path, "index") {
+		return false
+	}
+	return strings.HasPrefix(path, "/zbgg/") ||
+		strings.HasPrefix(path, "/fzbgg/") ||
+		strings.HasPrefix(path, "/zbhxrgs/") ||
+		strings.HasPrefix(path, "/fbgg/") ||
+		strings.HasPrefix(path, "/gsgg/") ||
+		strings.HasPrefix(path, "/xygg/")
+}
+
+func linkTitle(anchorHTML string, fallback string) string {
+	titleAttrRE := regexp.MustCompile(`(?is)\btitle=["']([^"']+)["']`)
+	if match := titleAttrRE.FindStringSubmatch(anchorHTML); len(match) > 1 {
+		return html.UnescapeString(match[1])
+	}
+	return fallback
+}
+
+func normalizeCSGTitle(title string) string {
+	return normalizeText(title)
+}
+
+func extractBracketTenderNo(title string) string {
+	re := regexp.MustCompile(`\[[A-Z0-9_\-./]+\]`)
+	match := re.FindString(title)
+	return strings.Trim(match, "[]")
 }
 
 func looksLikeNotice(title string) bool {
