@@ -18,6 +18,10 @@ var attachmentLinkRE = regexp.MustCompile(`(?is)<a\b[^>]*href=["']?([^"'\s>]+)["
 var invalidFileNameRE = regexp.MustCompile(`[\\/:*?"<>|\x00-\x1f]+`)
 
 func (a *App) archiveOpportunity(item *Opportunity, category NoticeCategory) {
+	a.archiveOpportunityWithProgress(item, category, nil)
+}
+
+func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeCategory, report func(substep string, completed bool, message string)) {
 	archiveRoot := a.GetArchiveConfig().RootPath
 	if archiveRoot == "" {
 		item.ProcessStatus = "归档失败"
@@ -26,20 +30,38 @@ func (a *App) archiveOpportunity(item *Opportunity, category NoticeCategory) {
 	}
 
 	archivePath := filepath.Join(archiveRoot, archiveFolderName(*item))
+	if report != nil {
+		report("创建文件夹", false, "正在创建公告归档目录")
+	}
 	if err := os.MkdirAll(archivePath, 0755); err != nil {
 		item.ProcessStatus = "归档失败"
 		item.ArchiveError = fmt.Sprintf("无法创建归档目录：%v", err)
 		return
 	}
 	item.ArchivePath = archivePath
-	if err := os.WriteFile(filepath.Join(archivePath, "notice.html"), []byte(offlineNoticeHTML(*item)), 0644); err != nil {
-		item.ProcessStatus = "归档失败"
-		item.ArchiveError = fmt.Sprintf("无法写入公告快照：%v", err)
-		return
+	if report != nil {
+		report("创建文件夹", true, "公告归档目录已创建")
 	}
 
 	rawDetail, err := a.fetchPublicDocument(item.SourceURL)
-	if err != nil || !isUsefulNoticeHTML(string(rawDetail), *item) {
+	detailAvailable := err == nil && isUsefulNoticeHTML(string(rawDetail), *item)
+	body := item.Content
+	if detailAvailable {
+		body = documentTextFromHTML(string(rawDetail))
+		item.DetailFetchedAt = nowString()
+	}
+	if report != nil {
+		report("创建 Word 文档", false, "正在写入公告 Word 文档")
+	}
+	if _, writeErr := writeNoticeDocx(archivePath, *item, body); writeErr != nil {
+		item.ProcessStatus = "归档失败"
+		item.ArchiveError = fmt.Sprintf("无法写入 Word 文档：%v", writeErr)
+		return
+	}
+	if report != nil {
+		report("创建 Word 文档", true, "公告 Word 文档已保存")
+	}
+	if !detailAvailable {
 		item.ProcessStatus = "待归档"
 		if err != nil {
 			item.ArchiveError = fmt.Sprintf("详情页未归档：%v", err)
@@ -48,16 +70,17 @@ func (a *App) archiveOpportunity(item *Opportunity, category NoticeCategory) {
 		}
 		return
 	}
-
-	if err := os.WriteFile(filepath.Join(archivePath, "source.html"), rawDetail, 0644); err != nil {
-		item.ProcessStatus = "归档失败"
-		item.ArchiveError = fmt.Sprintf("无法写入详情快照：%v", err)
-		return
-	}
-	item.DetailFetchedAt = nowString()
 	attachments := []Attachment{}
 	if category.DownloadAttachments {
+		if report != nil {
+			report("下载附件", false, "正在下载公告附件")
+		}
 		attachments = a.archiveAttachments(rawDetail, item.SourceURL, archivePath)
+		if report != nil {
+			report("下载附件", true, "公告附件下载完成")
+		}
+	} else if report != nil {
+		report("下载附件", true, "该栏目无需下载附件")
 	}
 	item.Attachments = attachments
 	for _, attachment := range attachments {
@@ -69,6 +92,64 @@ func (a *App) archiveOpportunity(item *Opportunity, category NoticeCategory) {
 	}
 	item.ProcessStatus = "已归档"
 	item.ArchiveError = ""
+}
+
+func (a *App) restoreMissingArchives(site SiteConfig, category NoticeCategory, days int) int {
+	cutoffDate := cutoffDateForDays(days)
+	a.mu.Lock()
+	candidates := make([]Opportunity, 0)
+	for _, item := range a.state.Opportunities {
+		if item.SiteID != site.ID || item.CategoryID != category.ID || !isWithinArchiveWindow(item, cutoffDate) || !archiveIsMissing(item) {
+			continue
+		}
+		candidates = append(candidates, item)
+	}
+	a.mu.Unlock()
+
+	restored := 0
+	for _, item := range candidates {
+		a.archiveOpportunity(&item, category)
+		item.UpdatedAt = nowString()
+		a.replaceArchivedOpportunity(item)
+		restored++
+	}
+	return restored
+}
+
+func isWithinArchiveWindow(item Opportunity, cutoffDate string) bool {
+	value := item.PublishTime
+	if value == "" {
+		value = item.CreatedAt
+	}
+	if len(value) < 10 {
+		return false
+	}
+	return isOnOrAfterCutoffDate(value, cutoffDate)
+}
+
+func archiveIsMissing(item Opportunity) bool {
+	if item.ArchivePath == "" {
+		return true
+	}
+	info, err := os.Stat(item.ArchivePath)
+	if err != nil || !info.IsDir() {
+		return true
+	}
+	_, err = os.Stat(noticeDocxPath(item.ArchivePath, item))
+	return err != nil
+}
+
+func (a *App) replaceArchivedOpportunity(updated Opportunity) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.state.Opportunities {
+		if a.state.Opportunities[i].ID == updated.ID {
+			updated.CreatedAt = a.state.Opportunities[i].CreatedAt
+			a.state.Opportunities[i] = updated
+			_ = a.saveLocked()
+			return
+		}
+	}
 }
 
 func (a *App) archiveAttachments(raw []byte, sourceURL string, archivePath string) []Attachment {
@@ -191,8 +272,4 @@ func looksLikeAttachment(href string) bool {
 func isUsefulNoticeHTML(raw string, item Opportunity) bool {
 	text := normalizeText(stripTags(raw))
 	return len([]rune(text)) > 200 && strings.Contains(text, item.Title)
-}
-
-func offlineNoticeHTML(item Opportunity) string {
-	return "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>" + html.EscapeString(item.Title) + "</title><body><h1>" + html.EscapeString(item.Title) + "</h1><dl><dt>来源</dt><dd>" + html.EscapeString(item.SourceSite) + "</dd><dt>栏目</dt><dd>" + html.EscapeString(item.CategoryName) + "</dd><dt>发布时间</dt><dd>" + html.EscapeString(item.PublishTime) + "</dd><dt>编号</dt><dd>" + html.EscapeString(item.TenderNo) + "</dd><dt>原文</dt><dd><a href=\"" + html.EscapeString(item.SourceURL) + "\">" + html.EscapeString(item.SourceURL) + "</a></dd></dl><pre>" + html.EscapeString(item.Content) + "</pre></body></html>"
 }

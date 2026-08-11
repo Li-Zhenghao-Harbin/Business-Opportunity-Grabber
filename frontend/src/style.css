@@ -176,6 +176,11 @@ nav button.active {
   color: #ffffff;
 }
 
+.danger {
+  border-color: #b45309;
+  color: #9a3412;
+}
+
 .topbar-actions {
   display: flex;
   align-items: flex-start;
@@ -186,6 +191,111 @@ nav button.active {
   display: grid;
   align-content: start;
   gap: 16px;
+}
+
+.automation-panel {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  max-width: 880px;
+}
+
+.automation-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.automation-head p {
+  margin: 6px 0 0;
+  color: #64748b;
+}
+
+.overall-progress {
+  display: flex;
+  justify-content: space-between;
+  color: #475569;
+  font-size: 13px;
+}
+
+progress {
+  width: 100%;
+  height: 12px;
+  accent-color: #2f6f73;
+}
+
+.automation-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.automation-steps li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px 16px;
+  padding: 12px;
+  border: 1px solid #dde5ef;
+  border-left: 4px solid #cbd5e1;
+}
+
+.automation-steps li.running {
+  border-left-color: #2f6f73;
+  background: #f4fbfa;
+}
+
+.automation-steps li.success,
+.automation-steps li.no_updates {
+  border-left-color: #238b5a;
+}
+
+.automation-steps li.failed {
+  border-left-color: #b45309;
+}
+
+.automation-steps strong,
+.automation-steps span {
+  display: block;
+}
+
+.automation-step-head span {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.automation-steps li > progress,
+.automation-substeps {
+  grid-column: 1 / -1;
+}
+
+.automation-substeps {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.automation-substep {
+  display: grid;
+  gap: 5px;
+}
+
+.automation-substep > div {
+  display: flex;
+  justify-content: space-between;
+  color: #475569;
+  font-size: 13px;
+}
+
+.automation-substep progress {
+  height: 7px;
+}
+
+.automation-substep small {
+  color: #64748b;
 }
 
 .schedule-row {

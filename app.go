@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -153,6 +154,23 @@ type CrawlTask struct {
 	ErrorMessage   string `json:"errorMessage"`
 }
 
+type AutomationProgress struct {
+	Current        int    `json:"current"`
+	Total          int    `json:"total"`
+	Title          string `json:"title"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	Percent        int    `json:"percent"`
+	Substep        string `json:"substep"`
+	SubstepPercent int    `json:"substepPercent"`
+}
+
+type HistoryClearResult struct {
+	DeletedOpportunities int `json:"deletedOpportunities"`
+	DeletedTasks         int `json:"deletedTasks"`
+	DeletedFolders       int `json:"deletedFolders"`
+}
+
 type ScheduleConfig struct {
 	Enabled         bool   `json:"enabled"`
 	Mode            string `json:"mode"`
@@ -249,12 +267,13 @@ func (a *App) initStore() error {
 			if err := json.Unmarshal(raw, &a.state); err != nil {
 				return err
 			}
+			a.normalizeCollectionsLocked()
 			a.ensureBuiltInSitesLocked()
 			a.normalizeArchiveLocked()
 			a.normalizeScheduleLocked()
 			return a.saveLocked()
 		}
-		a.state = AppState{Sites: defaultSites(), Archive: defaultArchiveConfig()}
+		a.state = AppState{Sites: defaultSites(), Opportunities: []Opportunity{}, Tasks: []CrawlTask{}, Archive: defaultArchiveConfig()}
 		a.normalizeArchiveLocked()
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
@@ -265,7 +284,7 @@ func (a *App) initStore() error {
 		return err
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		a.state = AppState{Sites: defaultSites(), Archive: defaultArchiveConfig()}
+		a.state = AppState{Sites: defaultSites(), Opportunities: []Opportunity{}, Tasks: []CrawlTask{}, Archive: defaultArchiveConfig()}
 		a.normalizeArchiveLocked()
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
@@ -273,10 +292,28 @@ func (a *App) initStore() error {
 	if err := json.Unmarshal(raw, &a.state); err != nil {
 		return err
 	}
+	a.normalizeCollectionsLocked()
 	a.ensureBuiltInSitesLocked()
 	a.normalizeArchiveLocked()
 	a.normalizeScheduleLocked()
 	return a.saveLocked()
+}
+
+func (a *App) normalizeCollectionsLocked() {
+	if a.state.Sites == nil {
+		a.state.Sites = []SiteConfig{}
+	}
+	if a.state.Opportunities == nil {
+		a.state.Opportunities = []Opportunity{}
+	}
+	if a.state.Tasks == nil {
+		a.state.Tasks = []CrawlTask{}
+	}
+	for i := range a.state.Sites {
+		if a.state.Sites[i].Watermarks == nil {
+			a.state.Sites[i].Watermarks = []CrawlWatermark{}
+		}
+	}
 }
 
 func defaultSites() []SiteConfig {
@@ -512,6 +549,144 @@ func (a *App) RunCrawl(req CrawlRequest) ([]CrawlTask, error) {
 	return a.runCrawl(req)
 }
 
+func (a *App) RunSGCCAutoPages1To7() ([]CrawlTask, error) {
+	a.crawlMu.Lock()
+	defer a.crawlMu.Unlock()
+
+	a.mu.Lock()
+	var site SiteConfig
+	for _, candidate := range a.state.Sites {
+		if candidate.SiteType == "sgcc" && candidate.Enabled {
+			site = candidate
+			break
+		}
+	}
+	a.mu.Unlock()
+	if site.ID == "" {
+		return nil, errors.New("未找到已启用的国家电网站点")
+	}
+
+	categoryIDs := []string{"sgcc-single-source", "sgcc-annual-plan", "sgcc-prequalification"}
+	categoryByID := map[string]NoticeCategory{}
+	for _, category := range site.Categories {
+		categoryByID[category.ID] = category
+	}
+	defaults := defaultSGCCCategories()
+	for _, category := range defaults {
+		if _, exists := categoryByID[category.ID]; !exists {
+			categoryByID[category.ID] = category
+		}
+	}
+
+	tasks := make([]CrawlTask, 0, len(categoryIDs))
+	for index, categoryID := range categoryIDs {
+		category := categoryByID[categoryID]
+		step := index + 1
+		if !category.Enabled {
+			a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: "skipped", Message: "栏目已停用"})
+			continue
+		}
+		days := site.DateRangeDays
+		if days <= 0 {
+			days = 31
+		}
+		a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: "running", Message: fmt.Sprintf("正在抓取最近 %d 天公告", days), Percent: 0, Substep: "抓取数据", SubstepPercent: 0})
+		task := a.crawlSGCCCategoryWithProgress(site, category, CrawlRequest{Days: days}, func(substep string, percent int, message string) {
+			a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: "running", Message: message, Percent: percent, Substep: substep, SubstepPercent: percent})
+		})
+		tasks = append(tasks, task)
+		message := "处理完成"
+		progressStatus := task.Status
+		switch task.Status {
+		case "no_updates":
+			restored := a.restoreMissingArchives(site, category, days)
+			if restored > 0 {
+				message = fmt.Sprintf("网站无更新，已恢复 %d 份缺失归档", restored)
+				progressStatus = "success"
+			} else {
+				message = "无更新"
+			}
+		case "failed":
+			message = task.ErrorMessage
+		}
+		a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: progressStatus, Message: message, Percent: 100, Substep: "更新状态", SubstepPercent: 100})
+	}
+	return tasks, nil
+}
+
+func (a *App) ClearHistory() (HistoryClearResult, error) {
+	a.crawlMu.Lock()
+	defer a.crawlMu.Unlock()
+
+	a.mu.Lock()
+	result := HistoryClearResult{
+		DeletedOpportunities: len(a.state.Opportunities),
+		DeletedTasks:         len(a.state.Tasks),
+	}
+	archiveRoot := a.state.Archive.RootPath
+	archivePaths := make([]string, 0, len(a.state.Opportunities))
+	for _, item := range a.state.Opportunities {
+		if item.ArchivePath != "" {
+			archivePaths = append(archivePaths, item.ArchivePath)
+		}
+	}
+	// Persist empty arrays rather than null so the desktop bridge and UI can treat a cleared history as a normal empty state.
+	a.state.Opportunities = []Opportunity{}
+	a.state.Tasks = []CrawlTask{}
+	for i := range a.state.Sites {
+		a.state.Sites[i].Watermarks = []CrawlWatermark{}
+	}
+	if err := a.saveLocked(); err != nil {
+		a.mu.Unlock()
+		return HistoryClearResult{}, err
+	}
+	a.mu.Unlock()
+
+	for _, archivePath := range cleanList(archivePaths) {
+		if !isWithinDirectory(archivePath, archiveRoot) {
+			continue
+		}
+		if err := os.RemoveAll(archivePath); err != nil {
+			return result, fmt.Errorf("无法删除历史归档 %s：%w", archivePath, err)
+		}
+		result.DeletedFolders++
+	}
+	return result, nil
+}
+
+func (a *App) OpenArchiveDirectory() error {
+	root := a.GetArchiveConfig().RootPath
+	if root == "" {
+		return errors.New("未配置归档目录")
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return fmt.Errorf("无法创建归档目录：%w", err)
+	}
+	return exec.Command("explorer.exe", root).Start()
+}
+
+func (a *App) emitAutomationProgress(progress AutomationProgress) {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "automation:progress", progress)
+	}
+}
+
+func isWithinDirectory(target string, root string) bool {
+	if strings.TrimSpace(target) == "" || strings.TrimSpace(root) == "" {
+		return false
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(absRoot, absTarget)
+	return err == nil && relative != "." && !strings.HasPrefix(relative, "..") && !filepath.IsAbs(relative)
+}
+
 func (a *App) runCrawl(req CrawlRequest) ([]CrawlTask, error) {
 	a.mu.Lock()
 	targets := a.resolveTargetsLocked(req.SiteIDs)
@@ -584,7 +759,7 @@ func (a *App) ListTasks() []CrawlTask {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	tasks := append([]CrawlTask(nil), a.state.Tasks...)
+	tasks := append([]CrawlTask{}, a.state.Tasks...)
 	sort.Slice(tasks, func(i, j int) bool {
 		return tasks[i].StartedAt > tasks[j].StartedAt
 	})
@@ -881,6 +1056,10 @@ func (genericSiteAdapter) CrawlTasks(app *App, site SiteConfig, req CrawlRequest
 }
 
 func (a *App) crawlSGCCCategory(site SiteConfig, category NoticeCategory, req CrawlRequest) (task CrawlTask) {
+	return a.crawlSGCCCategoryWithProgress(site, category, req, nil)
+}
+
+func (a *App) crawlSGCCCategoryWithProgress(site SiteConfig, category NoticeCategory, req CrawlRequest, report func(substep string, percent int, message string)) (task CrawlTask) {
 	task = CrawlTask{
 		ID:           makeID(fmt.Sprintf("%s-%s-%d", site.ID, category.ID, time.Now().UnixNano())),
 		SiteID:       site.ID,
@@ -892,9 +1071,15 @@ func (a *App) crawlSGCCCategory(site SiteConfig, category NoticeCategory, req Cr
 	}
 
 	watermark := watermarkFor(site, category.ID)
+	if report != nil {
+		report("抓取数据", 0, "正在读取公告列表")
+	}
 	items, nextWatermark, err := a.fetchSGCCCategory(site, category, req, watermark)
 	task.TotalCount = len(items)
 	if err != nil {
+		if report != nil {
+			report("抓取数据", 100, "公告列表抓取失败")
+		}
 		task.Status = "failed"
 		task.FailedCount = 1
 		task.ErrorMessage = err.Error()
@@ -902,18 +1087,38 @@ func (a *App) crawlSGCCCategory(site SiteConfig, category NoticeCategory, req Cr
 		a.recordTask(task)
 		return task
 	}
+	if report != nil {
+		report("抓取数据", 100, fmt.Sprintf("已识别 %d 条待处理公告", len(items)))
+	}
 	if len(items) == 0 {
 		task.Status = "no_updates"
 		task.FinishedAt = nowString()
 		a.updateWatermark(site.ID, nextWatermark)
 		a.recordTask(task)
+		if report != nil {
+			report("更新状态", 100, "无更新")
+		}
 		return task
 	}
 
 	for i := range items {
 		if category.ArchiveProject {
-			a.archiveOpportunity(&items[i], category)
+			itemIndex := i
+			totalItems := len(items)
+			a.archiveOpportunityWithProgress(&items[i], category, func(substep string, completed bool, message string) {
+				if report == nil {
+					return
+				}
+				percent := itemIndex * 100 / totalItems
+				if completed {
+					percent = (itemIndex + 1) * 100 / totalItems
+				}
+				report(substep, percent, message)
+			})
 		}
+	}
+	if report != nil {
+		report("更新状态", 0, "正在保存公告和抓取水位")
 	}
 	newCount, duplicateCount := a.upsertOpportunities(items)
 	task.NewCount = newCount
@@ -922,6 +1127,9 @@ func (a *App) crawlSGCCCategory(site SiteConfig, category NoticeCategory, req Cr
 	task.FinishedAt = nowString()
 	a.updateWatermark(site.ID, nextWatermark)
 	a.recordTask(task)
+	if report != nil {
+		report("更新状态", 100, "公告状态已更新")
+	}
 	return task
 }
 
@@ -1055,14 +1263,9 @@ func (a *App) fetchSGCCOpportunities(site SiteConfig, req CrawlRequest) ([]Oppor
 
 func (a *App) fetchSGCCCategory(site SiteConfig, category NoticeCategory, req CrawlRequest, watermark CrawlWatermark) ([]Opportunity, CrawlWatermark, error) {
 	const pageSize = 50
-	cutoff := time.Time{}
-	if req.Days > 0 {
-		cutoff = time.Now().AddDate(0, 0, -req.Days)
-	}
-	if watermark.LastNoticeTime != "" {
-		if watermarkTime, err := time.Parse("2006-01-02", watermark.LastNoticeTime); err == nil && (cutoff.IsZero() || watermarkTime.After(cutoff)) {
-			cutoff = watermarkTime
-		}
+	cutoffDate := cutoffDateForDays(req.Days)
+	if watermark.LastNoticeTime > cutoffDate {
+		cutoffDate = watermark.LastNoticeTime
 	}
 
 	items := []Opportunity{}
@@ -1098,12 +1301,9 @@ func (a *App) fetchSGCCCategory(site SiteConfig, category NoticeCategory, req Cr
 			if item.NoticeID == "" {
 				item.NoticeID = jsonValueString(notice.ID)
 			}
-			if item.PublishTime != "" {
-				publishedAt, err := time.Parse("2006-01-02", item.PublishTime)
-				if err == nil && !cutoff.IsZero() && publishedAt.Before(cutoff) {
-					pastBoundary = true
-					continue
-				}
+			if item.PublishTime != "" && !isOnOrAfterCutoffDate(item.PublishTime, cutoffDate) {
+				pastBoundary = true
+				continue
 			}
 			if a.isKnownOpportunity(item) {
 				continue
@@ -1254,6 +1454,23 @@ func normalizeSGCCDate(value string) string {
 	return value
 }
 
+func cutoffDateForDays(days int) string {
+	if days <= 0 {
+		return ""
+	}
+	return time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+}
+
+func isOnOrAfterCutoffDate(value string, cutoff string) bool {
+	if cutoff == "" {
+		return true
+	}
+	if len(value) < len("2006-01-02") {
+		return false
+	}
+	return value[:len("2006-01-02")] >= cutoff
+}
+
 func jsonValueString(raw json.RawMessage) string {
 	value := strings.TrimSpace(string(raw))
 	if value == "" || value == "null" {
@@ -1333,10 +1550,7 @@ func parseCSGHTMLForOpportunities(raw string, site SiteConfig, req CrawlRequest)
 	orgRE := regexp.MustCompile(`(?s)([^|<>]{2,80}(?:公司|有限责任公司|有限公司|供应链集团|供应链科技|电网公司|电网有限责任公司))\s*(?:&nbsp;|\xc2\xa0|\s)*\|`)
 
 	base, _ := url.Parse(site.BaseURL)
-	cutoff := time.Time{}
-	if req.Days > 0 {
-		cutoff = time.Now().AddDate(0, 0, -req.Days)
-	}
+	cutoffDate := cutoffDateForDays(req.Days)
 
 	seen := map[string]bool{}
 	var items []Opportunity
@@ -1365,11 +1579,8 @@ func parseCSGHTMLForOpportunities(raw string, site SiteConfig, req CrawlRequest)
 		if date := dateRE.FindString(contextText); date != "" {
 			publishTime = normalizeDate(date)
 		}
-		if !cutoff.IsZero() && publishTime != "" {
-			publishedAt, err := time.Parse("2006-01-02", publishTime)
-			if err == nil && publishedAt.Before(cutoff) {
-				continue
-			}
+		if publishTime != "" && !isOnOrAfterCutoffDate(publishTime, cutoffDate) {
+			continue
 		}
 
 		buyer := ""

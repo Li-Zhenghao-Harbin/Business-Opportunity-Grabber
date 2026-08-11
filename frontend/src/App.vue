@@ -1,6 +1,7 @@
 <script lang="ts" setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
+  ClearHistory,
   Dashboard,
   DeleteSite,
   GetArchiveConfig,
@@ -8,17 +9,58 @@ import {
   ListOpportunities,
   ListSites,
   ListTasks,
+  OpenArchiveDirectory,
   RetryArchive,
   RunCrawl,
+  RunSGCCAutoPages1To7,
   SaveArchiveConfig,
   SaveSchedule,
   SaveSite,
   SelectArchiveDirectory
 } from '../wailsjs/go/main/App'
 import { main } from '../wailsjs/go/models'
-import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
+import { BrowserOpenURL, EventsOn } from '../wailsjs/runtime/runtime'
 
-type Tab = 'opportunities' | 'sites' | 'schedule' | 'tasks'
+type Tab = 'automatic' | 'opportunities' | 'sites' | 'schedule' | 'tasks'
+type AutomationProgress = {
+  current: number
+  total: number
+  title: string
+  status: string
+  message: string
+  percent: number
+  substep: string
+  substepPercent: number
+}
+type AutoSubstep = {
+  name: string
+  status: string
+  percent: number
+  message: string
+}
+type AutoStep = {
+  title: string
+  status: string
+  message: string
+  percent: number
+  substeps: AutoSubstep[]
+}
+
+const autoSubstepNames = ['抓取数据', '创建文件夹', '创建 Word 文档', '下载附件', '更新状态']
+
+function createAutoSteps(): AutoStep[] {
+  return [
+    '1.1 单一来源采购事前公示',
+    '1.2 年度采购计划预安排',
+    '2.1 资格预审公告'
+  ].map((title) => ({
+    title,
+    status: 'pending',
+    message: '等待执行',
+    percent: 0,
+    substeps: autoSubstepNames.map((name) => ({ name, status: 'pending', percent: 0, message: '等待执行' }))
+  }))
+}
 
 const activeTab = ref<Tab>('opportunities')
 const loading = ref(false)
@@ -46,6 +88,8 @@ const schedule = ref<main.ScheduleConfig>({
   nextRunAt: ''
 })
 const archive = ref<main.ArchiveConfig>({ rootPath: '' })
+const autoRunning = ref(false)
+const autoSteps = ref<AutoStep[]>(createAutoSteps())
 
 const query = reactive({
   search: '',
@@ -74,6 +118,7 @@ const keywordInput = ref('')
 const regionInput = ref('')
 
 const visibleOpportunities = computed(() => opportunities.value)
+const autoOverallPercent = computed(() => Math.round(autoSteps.value.reduce((total, step) => total + step.percent, 0) / autoSteps.value.length))
 const scheduleStatus = computed(() => {
   if (!schedule.value.enabled) return '定时抓取未开启'
   const next = formatDateTime(schedule.value.nextRunAt)
@@ -127,8 +172,8 @@ async function refreshAll() {
       GetArchiveConfig()
     ])
     dashboard.value = dash
-    sites.value = siteList
-    tasks.value = taskList
+    sites.value = siteList || []
+    tasks.value = taskList || []
     schedule.value = scheduleConfig
     archive.value = archiveConfig
     await refreshOpportunities()
@@ -138,10 +183,10 @@ async function refreshAll() {
 }
 
 async function refreshOpportunities() {
-  opportunities.value = await ListOpportunities({
+  opportunities.value = (await ListOpportunities({
     search: query.search,
     siteId: query.siteId
-  })
+  })) || []
   if (selectedOpportunity.value) {
     selectedOpportunity.value =
       opportunities.value.find((item) => item.id === selectedOpportunity.value?.id) || null
@@ -153,7 +198,9 @@ function statusLabel(status: string) {
     success: '成功',
     no_updates: '无更新',
     failed: '失败',
-    running: '运行中'
+    running: '运行中',
+    pending: '等待中',
+    skipped: '已跳过'
   }
   return labels[status] || status
 }
@@ -260,6 +307,75 @@ async function retryArchive(item: main.Opportunity) {
   }
 }
 
+function updateAutoProgress(progress: AutomationProgress) {
+  const index = progress.current - 1
+  if (index < 0 || index >= autoSteps.value.length) return
+  const step = autoSteps.value[index]
+  const substep = step.substeps.find((item) => item.name === progress.substep)
+  if (substep) {
+    substep.status = progress.status
+    substep.percent = progress.substepPercent
+    substep.message = progress.message
+  }
+  step.title = progress.title
+  step.status = progress.status
+  step.message = progress.message
+  step.percent = progress.percent
+  if (progress.substep === '更新状态' && ['no_updates', 'failed', 'skipped'].includes(progress.status)) {
+    step.substeps.forEach((item) => {
+      if (item.status === 'pending') {
+        item.status = progress.status
+        item.percent = 100
+        item.message = progress.status === 'no_updates' ? '无新增公告，无需执行' : '本步骤未执行'
+      }
+    })
+  }
+}
+
+async function startAutomaticMode() {
+  activeTab.value = 'automatic'
+  if (autoRunning.value) return
+  autoRunning.value = true
+  autoSteps.value = createAutoSteps()
+  message.value = '全自动模式正在处理国网站点配置范围内的公告...'
+  try {
+    const result = await RunSGCCAutoPages1To7()
+    message.value = summarizeCrawlTasks(result)
+    await refreshAll()
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    autoRunning.value = false
+  }
+}
+
+async function clearHistory() {
+  if (!confirm('将删除公告记录、任务日志、抓取水位及已归档文件，然后立即从头重新执行国网全自动流程，确认继续？')) return
+  autoRunning.value = true
+  try {
+    const result = await ClearHistory()
+    selectedOpportunity.value = null
+    autoSteps.value = createAutoSteps()
+    message.value = `历史已删除：${result.deletedOpportunities} 条公告、${result.deletedTasks} 条任务、${result.deletedFolders} 个归档目录。正在从头重新抓取...`
+    await refreshAll()
+    autoRunning.value = false
+    await startAutomaticMode()
+    return
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    autoRunning.value = false
+  }
+}
+
+async function openArchiveDirectory() {
+  try {
+    await OpenArchiveDirectory()
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
 async function saveSite() {
   loading.value = true
   message.value = ''
@@ -324,7 +440,9 @@ function openSource(url: string) {
   BrowserOpenURL(url)
 }
 
+const removeAutoProgressListener = EventsOn('automation:progress', updateAutoProgress)
 onMounted(refreshAll)
+onBeforeUnmount(removeAutoProgressListener)
 </script>
 
 <template>
@@ -337,6 +455,7 @@ onMounted(refreshAll)
       </div>
 
       <nav>
+        <button :class="{ active: activeTab === 'automatic' }" @click="startAutomaticMode">全自动模式</button>
         <button :class="{ active: activeTab === 'opportunities' }" @click="activeTab = 'opportunities'">公告库</button>
         <button :class="{ active: activeTab === 'sites' }" @click="activeTab = 'sites'">站点配置</button>
         <button :class="{ active: activeTab === 'schedule' }" @click="activeTab = 'schedule'">定时抓取</button>
@@ -359,6 +478,7 @@ onMounted(refreshAll)
       <header class="topbar">
         <div>
           <h2 v-if="activeTab === 'opportunities'">公告库</h2>
+          <h2 v-else-if="activeTab === 'automatic'">全自动模式</h2>
           <h2 v-else-if="activeTab === 'sites'">站点配置</h2>
           <h2 v-else-if="activeTab === 'schedule'">定时抓取</h2>
           <h2 v-else>任务日志</h2>
@@ -371,7 +491,50 @@ onMounted(refreshAll)
         </div>
       </header>
 
-      <section v-if="activeTab === 'opportunities'" class="workspace two-column">
+      <section v-if="activeTab === 'automatic'" class="workspace">
+        <div class="panel automation-panel">
+          <div class="automation-head">
+            <div>
+              <h3>国家电网自动归档</h3>
+              <p>仅执行 PDF 第 1-7 页对应栏目，抓取范围使用国网站点配置。</p>
+            </div>
+            <div class="row-actions">
+              <button @click="openArchiveDirectory">打开保存目录</button>
+              <button class="danger" :disabled="autoRunning" @click="clearHistory">删除历史</button>
+            </div>
+          </div>
+          <div class="overall-progress">
+            <span>总进度</span>
+            <strong>{{ autoOverallPercent }}%</strong>
+          </div>
+          <progress :value="autoOverallPercent" max="100" />
+          <ol class="automation-steps">
+            <li v-for="step in autoSteps" :key="step.title" :class="step.status">
+              <div class="automation-step-head">
+                <strong>{{ step.title }}</strong>
+                <span>{{ step.percent }}% · {{ step.message }}</span>
+              </div>
+              <span>{{ statusLabel(step.status) }}</span>
+              <progress :value="step.percent" max="100" />
+              <div class="automation-substeps">
+                <div v-for="substep in step.substeps" :key="substep.name" class="automation-substep">
+                  <div>
+                    <span>{{ substep.name }}</span>
+                    <span>{{ substep.percent }}%</span>
+                  </div>
+                  <progress :value="substep.percent" max="100" />
+                  <small>{{ substep.message }}</small>
+                </div>
+              </div>
+            </li>
+          </ol>
+          <button class="primary" :disabled="autoRunning" @click="startAutomaticMode">
+            {{ autoRunning ? '正在执行...' : '重新执行' }}
+          </button>
+        </div>
+      </section>
+
+      <section v-else-if="activeTab === 'opportunities'" class="workspace two-column">
         <div class="panel">
           <div class="toolbar">
             <input v-model="query.search" placeholder="搜索标题、正文、来源..." @input="refreshOpportunities" />

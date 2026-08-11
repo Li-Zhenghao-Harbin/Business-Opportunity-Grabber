@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,6 +69,16 @@ func TestDefaultSGCCSiteIncludesP0Categories(t *testing.T) {
 	}
 }
 
+func TestDateCutoffIncludesCurrentDay(t *testing.T) {
+	today := time.Now().Format("2006-01-02")
+	if !isOnOrAfterCutoffDate(today, cutoffDateForDays(1)) {
+		t.Fatal("current-day notices must remain eligible for a one-day crawl")
+	}
+	if isOnOrAfterCutoffDate("2020-01-01", cutoffDateForDays(1)) {
+		t.Fatal("old notices must not pass the crawl cutoff")
+	}
+}
+
 func TestNextRunAtDaily(t *testing.T) {
 	now := time.Date(2026, time.August, 11, 10, 30, 0, 0, time.Local)
 	value := nextRunAt(now, ScheduleConfig{Mode: "daily", DailyTime: "09:00"})
@@ -101,8 +113,37 @@ func TestArchiveOpportunityWritesSnapshotAndAttachment(t *testing.T) {
 	if item.ProcessStatus != "已归档" {
 		t.Fatalf("expected archived status, got %q: %s", item.ProcessStatus, item.ArchiveError)
 	}
-	if _, err := os.Stat(filepath.Join(item.ArchivePath, "notice.html")); err != nil {
-		t.Fatalf("expected notice snapshot: %v", err)
+	if _, err := os.Stat(filepath.Join(item.ArchivePath, "notice.html")); !os.IsNotExist(err) {
+		t.Fatalf("notice.html should not be created, got %v", err)
+	}
+	docxPath := filepath.Join(item.ArchivePath, "测试采购公告.docx")
+	docx, err := zip.OpenReader(docxPath)
+	if err != nil {
+		t.Fatalf("expected readable Word document: %v", err)
+	}
+	defer docx.Close()
+	foundDocumentXML := false
+	for _, entry := range docx.File {
+		if entry.Name != "word/document.xml" {
+			continue
+		}
+		reader, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(content), "测试采购公告") || !strings.Contains(string(content), "公告正文") {
+			t.Fatalf("Word document does not contain expected notice text: %s", content)
+		}
+		foundDocumentXML = true
+		break
+	}
+	if !foundDocumentXML {
+		t.Fatal("Word document is missing word/document.xml")
 	}
 	if len(item.Attachments) != 1 || item.Attachments[0].Status != "已下载" {
 		t.Fatalf("unexpected attachments: %#v", item.Attachments)
@@ -117,5 +158,73 @@ func TestDedupeKeySeparatesCategories(t *testing.T) {
 	second.CategoryID = "sgcc-winners"
 	if dedupeKey(first) == dedupeKey(second) {
 		t.Fatal("expected different dedupe keys for different categories")
+	}
+}
+
+func TestRestoreMissingArchives(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`<html><body><h1>恢复归档公告</h1><p>` + strings.Repeat("归档正文", 80) + `</p></body></html>`))
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	site := defaultSGCCSite()
+	category := site.Categories[0]
+	item := Opportunity{
+		ID:           "restore-me",
+		SiteID:       site.ID,
+		CategoryID:   category.ID,
+		CategoryName: category.Name,
+		Title:        "恢复归档公告",
+		PublishTime:  time.Now().Format("2006-01-02"),
+		SourceURL:    server.URL,
+		Content:      "列表摘要",
+	}
+	app := NewApp()
+	app.state = AppState{Archive: ArchiveConfig{RootPath: root}, Opportunities: []Opportunity{item}}
+
+	if restored := app.restoreMissingArchives(site, category, 1); restored != 1 {
+		t.Fatalf("expected one restored archive, got %d", restored)
+	}
+	restoredItem := app.state.Opportunities[0]
+	if _, err := os.Stat(noticeDocxPath(restoredItem.ArchivePath, restoredItem)); err != nil {
+		t.Fatalf("expected restored Word document: %v", err)
+	}
+}
+
+func TestClearHistoryResetsWatermarksAndArchiveFolders(t *testing.T) {
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "2026-08-11_测试公告")
+	if err := os.MkdirAll(archivePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(archivePath, "测试公告.docx"), []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(t.TempDir(), "opportunity-data.json")
+	app := NewApp()
+	app.storePath = storePath
+	app.state = AppState{
+		Archive:       ArchiveConfig{RootPath: root},
+		Opportunities: []Opportunity{{ID: "notice", ArchivePath: archivePath}},
+		Tasks:         []CrawlTask{{ID: "task"}},
+		Sites:         []SiteConfig{{ID: "sgcc", Watermarks: []CrawlWatermark{{CategoryID: "sgcc-single-source"}}}},
+	}
+
+	result, err := app.ClearHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedOpportunities != 1 || result.DeletedTasks != 1 || result.DeletedFolders != 1 {
+		t.Fatalf("unexpected clear result: %#v", result)
+	}
+	if len(app.state.Opportunities) != 0 || len(app.state.Tasks) != 0 || len(app.state.Sites[0].Watermarks) != 0 {
+		t.Fatalf("history was not reset: %#v", app.state)
+	}
+	if app.state.Opportunities == nil || app.state.Tasks == nil || app.state.Sites[0].Watermarks == nil {
+		t.Fatal("cleared collections must remain empty arrays")
+	}
+	if _, err := os.Stat(archivePath); !os.IsNotExist(err) {
+		t.Fatalf("archive folder should be removed, got %v", err)
 	}
 }
