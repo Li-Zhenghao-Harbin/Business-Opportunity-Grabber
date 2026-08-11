@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestParseCSGHTMLForOpportunities(t *testing.T) {
 	site := defaultCSGSite()
@@ -46,5 +54,68 @@ func TestDefaultSitesIncludesCSG(t *testing.T) {
 	}
 	if sites[1].ID != "csg-zbcg" || sites[1].SiteType != "csg" || sites[1].BaseURL != defaultCSGURL {
 		t.Fatalf("unexpected CSG site config: %#v", sites[1])
+	}
+}
+
+func TestDefaultSGCCSiteIncludesP0Categories(t *testing.T) {
+	site := defaultSGCCSite()
+	if len(site.Categories) != 7 {
+		t.Fatalf("expected 7 SGCC categories, got %d", len(site.Categories))
+	}
+	if site.Categories[3].ID != "sgcc-bid" || site.Categories[3].MenuID != sgccListSpeMenuID {
+		t.Fatalf("unexpected bid category: %#v", site.Categories[3])
+	}
+}
+
+func TestNextRunAtDaily(t *testing.T) {
+	now := time.Date(2026, time.August, 11, 10, 30, 0, 0, time.Local)
+	value := nextRunAt(now, ScheduleConfig{Mode: "daily", DailyTime: "09:00"})
+	next, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Day() != 12 || next.Hour() != 9 || next.Minute() != 0 {
+		t.Fatalf("unexpected next daily run: %s", value)
+	}
+}
+
+func TestArchiveOpportunityWritesSnapshotAndAttachment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/notice":
+			_, _ = writer.Write([]byte(`<html><body><h1>测试采购公告</h1><p>` + strings.Repeat("公告正文", 80) + `</p><a href="/files/list.xlsx">需求一览表.xlsx</a></body></html>`))
+		case "/files/list.xlsx":
+			_, _ = writer.Write([]byte("test attachment"))
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	app := NewApp()
+	app.state.Archive = ArchiveConfig{RootPath: root}
+	item := Opportunity{Title: "测试采购公告", PublishTime: "2026-08-11", SourceURL: server.URL + "/notice", Content: "列表摘要"}
+	app.archiveOpportunity(&item, NoticeCategory{DownloadAttachments: true})
+
+	if item.ProcessStatus != "已归档" {
+		t.Fatalf("expected archived status, got %q: %s", item.ProcessStatus, item.ArchiveError)
+	}
+	if _, err := os.Stat(filepath.Join(item.ArchivePath, "notice.html")); err != nil {
+		t.Fatalf("expected notice snapshot: %v", err)
+	}
+	if len(item.Attachments) != 1 || item.Attachments[0].Status != "已下载" {
+		t.Fatalf("unexpected attachments: %#v", item.Attachments)
+	}
+}
+
+func TestDedupeKeySeparatesCategories(t *testing.T) {
+	base := Opportunity{SiteID: "sgcc", TenderNo: "same-project"}
+	first := base
+	first.CategoryID = "sgcc-bid"
+	second := base
+	second.CategoryID = "sgcc-winners"
+	if dedupeKey(first) == dedupeKey(second) {
+		t.Fatal("expected different dedupe keys for different categories")
 	}
 }

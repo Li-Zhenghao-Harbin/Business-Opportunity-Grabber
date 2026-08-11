@@ -3,15 +3,19 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import {
   Dashboard,
   DeleteSite,
+  GetArchiveConfig,
   GetSchedule,
   ListOpportunities,
   ListSites,
   ListTasks,
+  RetryArchive,
   RunCrawl,
+  SaveArchiveConfig,
   SaveSchedule,
-  SaveSite
+  SaveSite,
+  SelectArchiveDirectory
 } from '../wailsjs/go/main/App'
-import type { main } from '../wailsjs/go/models'
+import { main } from '../wailsjs/go/models'
 import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
 
 type Tab = 'opportunities' | 'sites' | 'schedule' | 'tasks'
@@ -35,17 +39,20 @@ const selectedOpportunity = ref<main.Opportunity | null>(null)
 const savingSchedule = ref(false)
 const schedule = ref<main.ScheduleConfig>({
   enabled: false,
+  mode: 'interval',
   intervalMinutes: 60,
+  dailyTime: '09:00',
   lastRunAt: '',
   nextRunAt: ''
 })
+const archive = ref<main.ArchiveConfig>({ rootPath: '' })
 
 const query = reactive({
   search: '',
   siteId: ''
 })
 
-const siteForm = reactive<main.SiteConfig>({
+const siteForm = reactive(new main.SiteConfig({
   id: '',
   name: '',
   siteType: 'custom',
@@ -57,9 +64,11 @@ const siteForm = reactive<main.SiteConfig>({
   dateRangeDays: 7,
   minIntervalMs: 1500,
   maxRetries: 3,
+  categories: [],
+  watermarks: [],
   createdAt: '',
   updatedAt: ''
-})
+}))
 
 const keywordInput = ref('')
 const regionInput = ref('')
@@ -84,6 +93,8 @@ function resetSiteForm() {
     dateRangeDays: 7,
     minIntervalMs: 1500,
     maxRetries: 3,
+    categories: [],
+    watermarks: [],
     createdAt: '',
     updatedAt: ''
   })
@@ -108,16 +119,18 @@ function splitList(value: string) {
 async function refreshAll() {
   loading.value = true
   try {
-    const [dash, siteList, taskList, scheduleConfig] = await Promise.all([
+    const [dash, siteList, taskList, scheduleConfig, archiveConfig] = await Promise.all([
       Dashboard(),
       ListSites(),
       ListTasks(),
-      GetSchedule()
+      GetSchedule(),
+      GetArchiveConfig()
     ])
     dashboard.value = dash
     sites.value = siteList
     tasks.value = taskList
     schedule.value = scheduleConfig
+    archive.value = archiveConfig
     await refreshOpportunities()
   } finally {
     loading.value = false
@@ -138,6 +151,7 @@ async function refreshOpportunities() {
 function statusLabel(status: string) {
   const labels: Record<string, string> = {
     success: '成功',
+    no_updates: '无更新',
     failed: '失败',
     running: '运行中'
   }
@@ -200,7 +214,9 @@ async function saveSchedule() {
   try {
     schedule.value = await SaveSchedule({
       enabled: schedule.value.enabled,
+      mode: schedule.value.mode,
       intervalMinutes: Number(schedule.value.intervalMinutes) || 60,
+      dailyTime: schedule.value.dailyTime,
       lastRunAt: schedule.value.lastRunAt,
       nextRunAt: schedule.value.nextRunAt
     })
@@ -211,6 +227,36 @@ async function saveSchedule() {
     message.value = error instanceof Error ? error.message : String(error)
   } finally {
     savingSchedule.value = false
+  }
+}
+
+async function chooseArchiveDirectory() {
+  const selected = await SelectArchiveDirectory()
+  if (selected) archive.value.rootPath = selected
+}
+
+async function saveArchiveConfig() {
+  loading.value = true
+  try {
+    archive.value = await SaveArchiveConfig({ rootPath: archive.value.rootPath })
+    message.value = '公告归档目录已保存'
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function retryArchive(item: main.Opportunity) {
+  loading.value = true
+  try {
+    selectedOpportunity.value = await RetryArchive(item.id)
+    message.value = '已重新执行公告归档'
+    await refreshOpportunities()
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    loading.value = false
   }
 }
 
@@ -359,7 +405,10 @@ onMounted(refreshAll)
           <template v-if="selectedOpportunity">
             <div class="detail-head">
               <h3>{{ selectedOpportunity.title }}</h3>
-              <button @click="openSource(selectedOpportunity.sourceUrl)">打开原文</button>
+              <div class="row-actions">
+                <button @click="openSource(selectedOpportunity.sourceUrl)">打开原文</button>
+                <button :disabled="loading" @click="retryArchive(selectedOpportunity)">重新归档</button>
+              </div>
             </div>
             <dl>
               <dt>来源</dt>
@@ -376,7 +425,14 @@ onMounted(refreshAll)
               <dd>{{ selectedOpportunity.tenderNo || '未识别' }}</dd>
               <dt>截止时间</dt>
               <dd>{{ selectedOpportunity.deadline || '未识别' }}</dd>
+              <dt>处理状态</dt>
+              <dd>{{ selectedOpportunity.processStatus || '待处理' }}</dd>
+              <dt>归档目录</dt>
+              <dd>{{ selectedOpportunity.archivePath || '尚未归档' }}</dd>
+              <dt>附件</dt>
+              <dd>{{ selectedOpportunity.attachments?.length || 0 }} 个</dd>
             </dl>
+            <p v-if="selectedOpportunity.archiveError" class="content-text">归档说明：{{ selectedOpportunity.archiveError }}</p>
             <p class="content-text">{{ selectedOpportunity.content }}</p>
           </template>
           <div v-else class="empty">选择一条公告查看详情。</div>
@@ -443,19 +499,42 @@ onMounted(refreshAll)
           </div>
         </form>
 
-        <div class="panel">
+        <div class="panel form">
+          <form class="form" @submit.prevent="saveArchiveConfig">
+            <h3>公告归档目录</h3>
+            <label>
+              下载与快照保存位置
+              <input v-model="archive.rootPath" required placeholder="D:\\商机提取器归档" />
+            </label>
+            <div class="actions">
+              <button type="button" :disabled="loading" @click="chooseArchiveDirectory">选择目录</button>
+              <button class="primary" type="submit" :disabled="loading">保存目录</button>
+            </div>
+          </form>
+
           <h3>已配置站点</h3>
           <article v-for="site in sites" :key="site.id" class="site-row">
             <div>
               <h4>{{ site.name }}</h4>
               <p>{{ site.baseUrl }}</p>
               <span>{{ site.siteType }} · {{ site.renderMode }} · {{ site.enabled ? '启用' : '停用' }}</span>
+              <p v-if="site.siteType === 'sgcc'">已启用栏目：{{ site.categories?.filter((item) => item.enabled).length || 0 }}</p>
             </div>
             <div class="row-actions">
               <button @click="editSite(site)">编辑</button>
               <button @click="removeSite(site.id)">删除</button>
             </div>
           </article>
+        </div>
+      </section>
+
+      <section v-if="activeTab === 'sites' && siteForm.siteType === 'sgcc'" class="workspace">
+        <div class="panel form">
+          <h3>国家电网公告栏目</h3>
+          <label v-for="category in siteForm.categories" :key="category.id" class="check">
+            <input v-model="category.enabled" type="checkbox" />
+            {{ category.name }}
+          </label>
         </div>
       </section>
 
@@ -467,6 +546,13 @@ onMounted(refreshAll)
               启用定时抓取
             </label>
             <label>
+              执行方式
+              <select v-model="schedule.mode" :disabled="savingSchedule || !schedule.enabled" @change="saveSchedule">
+                <option value="interval">固定间隔</option>
+                <option value="daily">每日固定时间</option>
+              </select>
+            </label>
+            <label>
               间隔分钟
               <input
                 v-model.number="schedule.intervalMinutes"
@@ -474,9 +560,13 @@ onMounted(refreshAll)
                 max="1440"
                 step="5"
                 type="number"
-                :disabled="savingSchedule || !schedule.enabled"
+                :disabled="savingSchedule || !schedule.enabled || schedule.mode === 'daily'"
                 @change="saveSchedule"
               />
+            </label>
+            <label v-if="schedule.mode === 'daily'">
+              每日执行时间
+              <input v-model="schedule.dailyTime" type="time" :disabled="savingSchedule || !schedule.enabled" @change="saveSchedule" />
             </label>
           </div>
           <dl>
@@ -496,6 +586,7 @@ onMounted(refreshAll)
             <thead>
               <tr>
                 <th>站点</th>
+                <th>栏目</th>
                 <th>状态</th>
                 <th>新增</th>
                 <th>重复/更新</th>
@@ -507,6 +598,7 @@ onMounted(refreshAll)
             <tbody>
               <tr v-for="task in tasks" :key="task.id">
                 <td>{{ task.siteName }}</td>
+                <td>{{ task.categoryName || '-' }}</td>
                 <td>{{ statusLabel(task.status) }}</td>
                 <td>{{ task.newCount }}</td>
                 <td>{{ task.duplicateCount }}</td>

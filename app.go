@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const defaultSGCCURL = "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe"
@@ -43,52 +45,104 @@ type App struct {
 	client    *http.Client
 }
 
+// SiteAdapter isolates site-specific list and detail workflows from shared storage and archiving.
+type SiteAdapter interface {
+	CrawlTasks(app *App, site SiteConfig, req CrawlRequest) []CrawlTask
+}
+
+type sgccAdapter struct{}
+type genericSiteAdapter struct{}
+
 type AppState struct {
 	Sites         []SiteConfig   `json:"sites"`
 	Opportunities []Opportunity  `json:"opportunities"`
 	Tasks         []CrawlTask    `json:"tasks"`
 	Schedule      ScheduleConfig `json:"schedule"`
+	Archive       ArchiveConfig  `json:"archive"`
 }
 
 type SiteConfig struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	SiteType      string   `json:"siteType"`
-	BaseURL       string   `json:"baseUrl"`
-	Enabled       bool     `json:"enabled"`
-	RenderMode    string   `json:"renderMode"`
-	Keywords      []string `json:"keywords"`
-	Regions       []string `json:"regions"`
-	DateRangeDays int      `json:"dateRangeDays"`
-	MinIntervalMS int      `json:"minIntervalMs"`
-	MaxRetries    int      `json:"maxRetries"`
-	CreatedAt     string   `json:"createdAt"`
-	UpdatedAt     string   `json:"updatedAt"`
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	SiteType      string           `json:"siteType"`
+	BaseURL       string           `json:"baseUrl"`
+	Enabled       bool             `json:"enabled"`
+	RenderMode    string           `json:"renderMode"`
+	Keywords      []string         `json:"keywords"`
+	Regions       []string         `json:"regions"`
+	DateRangeDays int              `json:"dateRangeDays"`
+	MinIntervalMS int              `json:"minIntervalMs"`
+	MaxRetries    int              `json:"maxRetries"`
+	Categories    []NoticeCategory `json:"categories"`
+	Watermarks    []CrawlWatermark `json:"watermarks"`
+	CreatedAt     string           `json:"createdAt"`
+	UpdatedAt     string           `json:"updatedAt"`
+}
+
+type NoticeCategory struct {
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	MenuID              string `json:"menuId"`
+	NoticeType          string `json:"noticeType"`
+	Enabled             bool   `json:"enabled"`
+	DownloadAttachments bool   `json:"downloadAttachments"`
+	ArchiveProject      bool   `json:"archiveProject"`
+}
+
+type CrawlWatermark struct {
+	CategoryID     string `json:"categoryId"`
+	LastSuccessAt  string `json:"lastSuccessAt"`
+	LastNoticeTime string `json:"lastNoticeTime"`
+	LastNoticeID   string `json:"lastNoticeId"`
+}
+
+type ArchiveConfig struct {
+	RootPath string `json:"rootPath"`
+}
+
+type Attachment struct {
+	Name        string `json:"name"`
+	SourceURL   string `json:"sourceUrl"`
+	LocalPath   string `json:"localPath"`
+	Size        int64  `json:"size"`
+	Hash        string `json:"hash"`
+	Status      string `json:"status"`
+	ErrorReason string `json:"errorReason"`
 }
 
 type Opportunity struct {
-	ID              string   `json:"id"`
-	SiteID          string   `json:"siteId"`
-	SourceSite      string   `json:"sourceSite"`
-	Title           string   `json:"title"`
-	NoticeType      string   `json:"noticeType"`
-	PublishTime     string   `json:"publishTime"`
-	Region          string   `json:"region"`
-	TenderNo        string   `json:"tenderNo"`
-	Buyer           string   `json:"buyer"`
-	Deadline        string   `json:"deadline"`
-	SourceURL       string   `json:"sourceUrl"`
-	Content         string   `json:"content"`
-	MatchedKeywords []string `json:"matchedKeywords"`
-	ContentHash     string   `json:"contentHash"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt"`
+	ID              string       `json:"id"`
+	SiteID          string       `json:"siteId"`
+	SourceSite      string       `json:"sourceSite"`
+	Title           string       `json:"title"`
+	NoticeType      string       `json:"noticeType"`
+	PublishTime     string       `json:"publishTime"`
+	Region          string       `json:"region"`
+	TenderNo        string       `json:"tenderNo"`
+	Buyer           string       `json:"buyer"`
+	Deadline        string       `json:"deadline"`
+	SourceURL       string       `json:"sourceUrl"`
+	Content         string       `json:"content"`
+	MatchedKeywords []string     `json:"matchedKeywords"`
+	ContentHash     string       `json:"contentHash"`
+	CategoryID      string       `json:"categoryId"`
+	CategoryName    string       `json:"categoryName"`
+	NoticeID        string       `json:"noticeId"`
+	ProcessStatus   string       `json:"processStatus"`
+	ArchivePath     string       `json:"archivePath"`
+	DetailFetchedAt string       `json:"detailFetchedAt"`
+	ArchiveError    string       `json:"archiveError"`
+	Attachments     []Attachment `json:"attachments"`
+	CreatedAt       string       `json:"createdAt"`
+	UpdatedAt       string       `json:"updatedAt"`
 }
 
 type CrawlTask struct {
 	ID             string `json:"id"`
 	SiteID         string `json:"siteId"`
 	SiteName       string `json:"siteName"`
+	CategoryID     string `json:"categoryId"`
+	CategoryName   string `json:"categoryName"`
 	Status         string `json:"status"`
 	StartedAt      string `json:"startedAt"`
 	FinishedAt     string `json:"finishedAt"`
@@ -101,7 +155,9 @@ type CrawlTask struct {
 
 type ScheduleConfig struct {
 	Enabled         bool   `json:"enabled"`
+	Mode            string `json:"mode"`
 	IntervalMinutes int    `json:"intervalMinutes"`
+	DailyTime       string `json:"dailyTime"`
 	LastRunAt       string `json:"lastRunAt"`
 	NextRunAt       string `json:"nextRunAt"`
 }
@@ -194,10 +250,12 @@ func (a *App) initStore() error {
 				return err
 			}
 			a.ensureBuiltInSitesLocked()
+			a.normalizeArchiveLocked()
 			a.normalizeScheduleLocked()
 			return a.saveLocked()
 		}
-		a.state = AppState{Sites: defaultSites()}
+		a.state = AppState{Sites: defaultSites(), Archive: defaultArchiveConfig()}
+		a.normalizeArchiveLocked()
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
@@ -207,21 +265,18 @@ func (a *App) initStore() error {
 		return err
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		a.state = AppState{Sites: defaultSites()}
+		a.state = AppState{Sites: defaultSites(), Archive: defaultArchiveConfig()}
+		a.normalizeArchiveLocked()
 		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
 	if err := json.Unmarshal(raw, &a.state); err != nil {
 		return err
 	}
-	siteCount := len(a.state.Sites)
 	a.ensureBuiltInSitesLocked()
-	if len(a.state.Sites) != siteCount {
-		a.normalizeScheduleLocked()
-		return a.saveLocked()
-	}
+	a.normalizeArchiveLocked()
 	a.normalizeScheduleLocked()
-	return nil
+	return a.saveLocked()
 }
 
 func defaultSites() []SiteConfig {
@@ -246,6 +301,11 @@ func (a *App) ensureBuiltInSitesLocked() {
 			a.state.Sites = append(a.state.Sites, builtIn)
 		}
 	}
+	for i := range a.state.Sites {
+		if a.state.Sites[i].SiteType == "sgcc" && len(a.state.Sites[i].Categories) == 0 {
+			a.state.Sites[i].Categories = defaultSGCCCategories()
+		}
+	}
 }
 
 func defaultSGCCSite() SiteConfig {
@@ -262,9 +322,31 @@ func defaultSGCCSite() SiteConfig {
 		DateRangeDays: 7,
 		MinIntervalMS: 1500,
 		MaxRetries:    3,
+		Categories:    defaultSGCCCategories(),
+		Watermarks:    []CrawlWatermark{},
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
+}
+
+func defaultSGCCCategories() []NoticeCategory {
+	return []NoticeCategory{
+		{ID: "sgcc-single-source", Name: "单一来源采购事前公示", MenuID: "2019102186483919", NoticeType: "单一来源公示", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-annual-plan", Name: "年度采购计划预安排", MenuID: "2020052000175277", NoticeType: "年度采购计划", Enabled: true, DownloadAttachments: false, ArchiveProject: true},
+		{ID: "sgcc-prequalification", Name: "资格预审公告", MenuID: "2018032700290425", NoticeType: "资格预审", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-bid", Name: "招标公告及投标邀请书", MenuID: "2018032700291334", NoticeType: "招标公告", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-procurement", Name: "采购公告", MenuID: "2018032900295987", NoticeType: "采购公告", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-winners", Name: "推荐中标候选人公示", MenuID: "2018060501171107", NoticeType: "推荐中标候选人公示", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-qualification", Name: "资质能力核实", MenuID: "2019071434441442", NoticeType: "资质能力核实", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+	}
+}
+
+func defaultArchiveConfig() ArchiveConfig {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ArchiveConfig{}
+	}
+	return ArchiveConfig{RootPath: filepath.Join(home, "Documents", "商机提取器归档")}
 }
 
 func defaultCSGSite() SiteConfig {
@@ -284,6 +366,49 @@ func defaultCSGSite() SiteConfig {
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
+}
+
+func (a *App) GetArchiveConfig() ArchiveConfig {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.normalizeArchiveLocked()
+	return a.state.Archive
+}
+
+func (a *App) SaveArchiveConfig(config ArchiveConfig) (ArchiveConfig, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	config.RootPath = strings.TrimSpace(config.RootPath)
+	if config.RootPath == "" {
+		return ArchiveConfig{}, errors.New("归档目录不能为空")
+	}
+	absPath, err := filepath.Abs(config.RootPath)
+	if err != nil {
+		return ArchiveConfig{}, fmt.Errorf("归档目录无效：%w", err)
+	}
+	if err := os.MkdirAll(absPath, 0755); err != nil {
+		return ArchiveConfig{}, fmt.Errorf("无法创建归档目录：%w", err)
+	}
+	a.state.Archive = ArchiveConfig{RootPath: absPath}
+	if err := a.saveLocked(); err != nil {
+		return ArchiveConfig{}, err
+	}
+	return a.state.Archive, nil
+}
+
+func (a *App) SelectArchiveDirectory() (string, error) {
+	defaultDirectory := a.GetArchiveConfig().RootPath
+	if defaultDirectory != "" {
+		if _, err := os.Stat(defaultDirectory); err != nil {
+			defaultDirectory = ""
+		}
+	}
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:                "选择公告归档目录",
+		DefaultDirectory:     defaultDirectory,
+		CanCreateDirectories: true,
+	})
 }
 
 func (a *App) Dashboard() Dashboard {
@@ -344,6 +469,7 @@ func (a *App) SaveSite(site SiteConfig) (SiteConfig, error) {
 	}
 	site.Keywords = cleanList(site.Keywords)
 	site.Regions = cleanList(site.Regions)
+	site.Categories = normalizeCategories(site.Categories)
 
 	now := nowString()
 	if site.ID == "" {
@@ -397,8 +523,7 @@ func (a *App) runCrawl(req CrawlRequest) ([]CrawlTask, error) {
 
 	var tasks []CrawlTask
 	for _, site := range targets {
-		task := a.crawlSite(site, req)
-		tasks = append(tasks, task)
+		tasks = append(tasks, a.crawlSiteTasks(site, req)...)
 	}
 	return tasks, nil
 }
@@ -415,6 +540,15 @@ func (a *App) SaveSchedule(schedule ScheduleConfig) (ScheduleConfig, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if schedule.Mode == "" {
+		schedule.Mode = "interval"
+	}
+	if schedule.Mode != "interval" && schedule.Mode != "daily" {
+		return ScheduleConfig{}, errors.New("定时模式必须为 interval 或 daily")
+	}
+	if schedule.Mode == "daily" && !validDailyTime(schedule.DailyTime) {
+		return ScheduleConfig{}, errors.New("每日执行时间格式应为 HH:MM")
+	}
 	if schedule.IntervalMinutes <= 0 {
 		schedule.IntervalMinutes = 60
 	}
@@ -428,8 +562,9 @@ func (a *App) SaveSchedule(schedule ScheduleConfig) (ScheduleConfig, error) {
 	existing := a.state.Schedule
 	schedule.LastRunAt = existing.LastRunAt
 	if schedule.Enabled {
-		if !existing.Enabled || existing.IntervalMinutes != schedule.IntervalMinutes || strings.TrimSpace(schedule.NextRunAt) == "" {
-			schedule.NextRunAt = time.Now().Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		changed := !existing.Enabled || existing.IntervalMinutes != schedule.IntervalMinutes || existing.Mode != schedule.Mode || existing.DailyTime != schedule.DailyTime || strings.TrimSpace(schedule.NextRunAt) == ""
+		if changed {
+			schedule.NextRunAt = nextRunAt(time.Now(), schedule)
 		} else {
 			schedule.NextRunAt = existing.NextRunAt
 		}
@@ -488,6 +623,58 @@ func (a *App) ListOpportunities(query OpportunityQuery) []Opportunity {
 	return items
 }
 
+func (a *App) RetryArchive(opportunityID string) (Opportunity, error) {
+	a.mu.Lock()
+	var item Opportunity
+	var site SiteConfig
+	found := false
+	for _, candidate := range a.state.Opportunities {
+		if candidate.ID == opportunityID {
+			item = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		a.mu.Unlock()
+		return Opportunity{}, errors.New("未找到公告")
+	}
+	for _, candidate := range a.state.Sites {
+		if candidate.ID == item.SiteID {
+			site = candidate
+			break
+		}
+	}
+	a.mu.Unlock()
+
+	category := NoticeCategory{ID: item.CategoryID, Name: item.CategoryName, ArchiveProject: true, DownloadAttachments: true}
+	for _, candidate := range site.Categories {
+		if candidate.ID == item.CategoryID {
+			category = candidate
+			break
+		}
+	}
+	if !category.ArchiveProject {
+		return Opportunity{}, errors.New("该公告栏目未启用归档")
+	}
+	a.archiveOpportunity(&item, category)
+	item.UpdatedAt = nowString()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.state.Opportunities {
+		if a.state.Opportunities[i].ID == item.ID {
+			item.CreatedAt = a.state.Opportunities[i].CreatedAt
+			a.state.Opportunities[i] = item
+			if err := a.saveLocked(); err != nil {
+				return Opportunity{}, err
+			}
+			return item, nil
+		}
+	}
+	return Opportunity{}, errors.New("公告已不存在")
+}
+
 func (a *App) resolveTargetsLocked(ids []string) []SiteConfig {
 	idSet := map[string]bool{}
 	for _, id := range ids {
@@ -531,14 +718,14 @@ func (a *App) runScheduledCrawlIfDue() {
 		a.mu.Unlock()
 		return
 	}
-	nextRunAt, err := time.Parse(time.RFC3339, schedule.NextRunAt)
+	scheduledFor, err := time.Parse(time.RFC3339, schedule.NextRunAt)
 	if err != nil {
 		a.state.Schedule.NextRunAt = now.Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
 		_ = a.saveLocked()
 		a.mu.Unlock()
 		return
 	}
-	if now.Before(nextRunAt) {
+	if now.Before(scheduledFor) {
 		a.mu.Unlock()
 		return
 	}
@@ -549,19 +736,32 @@ func (a *App) runScheduledCrawlIfDue() {
 	}
 	defer a.crawlMu.Unlock()
 
-	_, _ = a.runCrawl(CrawlRequest{Days: 7})
+	days := 7
+	if schedule.Mode == "daily" {
+		days = 1
+	}
+	_, _ = a.runCrawl(CrawlRequest{Days: days})
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.normalizeScheduleLocked()
 	if a.state.Schedule.Enabled {
 		a.state.Schedule.LastRunAt = nowString()
-		a.state.Schedule.NextRunAt = time.Now().Add(time.Duration(a.state.Schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+		a.state.Schedule.NextRunAt = nextRunAt(time.Now(), a.state.Schedule)
 		_ = a.saveLocked()
 	}
 }
 
 func (a *App) normalizeScheduleLocked() {
+	if a.state.Schedule.Mode == "" {
+		a.state.Schedule.Mode = "interval"
+	}
+	if a.state.Schedule.Mode != "daily" {
+		a.state.Schedule.Mode = "interval"
+	}
+	if !validDailyTime(a.state.Schedule.DailyTime) {
+		a.state.Schedule.DailyTime = "09:00"
+	}
 	if a.state.Schedule.IntervalMinutes <= 0 {
 		a.state.Schedule.IntervalMinutes = 60
 	}
@@ -574,6 +774,45 @@ func (a *App) normalizeScheduleLocked() {
 	if !a.state.Schedule.Enabled {
 		a.state.Schedule.NextRunAt = ""
 	}
+}
+
+func (a *App) normalizeArchiveLocked() {
+	if strings.TrimSpace(a.state.Archive.RootPath) == "" {
+		a.state.Archive = defaultArchiveConfig()
+	}
+}
+
+func normalizeCategories(categories []NoticeCategory) []NoticeCategory {
+	cleaned := make([]NoticeCategory, 0, len(categories))
+	seen := map[string]bool{}
+	for _, category := range categories {
+		category.ID = strings.TrimSpace(category.ID)
+		category.Name = strings.TrimSpace(category.Name)
+		category.MenuID = strings.TrimSpace(category.MenuID)
+		if category.ID == "" || category.Name == "" || category.MenuID == "" || seen[category.ID] {
+			continue
+		}
+		seen[category.ID] = true
+		cleaned = append(cleaned, category)
+	}
+	return cleaned
+}
+
+func validDailyTime(value string) bool {
+	_, err := time.Parse("15:04", value)
+	return err == nil
+}
+
+func nextRunAt(now time.Time, schedule ScheduleConfig) string {
+	if schedule.Mode != "daily" {
+		return now.Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
+	}
+	dailyTime, _ := time.Parse("15:04", schedule.DailyTime)
+	next := time.Date(now.Year(), now.Month(), now.Day(), dailyTime.Hour(), dailyTime.Minute(), 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next.Format(time.RFC3339)
 }
 
 func (a *App) crawlSite(site SiteConfig, req CrawlRequest) (task CrawlTask) {
@@ -614,6 +853,106 @@ func (a *App) crawlSite(site SiteConfig, req CrawlRequest) (task CrawlTask) {
 	task.FinishedAt = nowString()
 	a.recordTask(task)
 	return task
+}
+
+func (a *App) crawlSiteTasks(site SiteConfig, req CrawlRequest) []CrawlTask {
+	if site.SiteType == "sgcc" {
+		return sgccAdapter{}.CrawlTasks(a, site, req)
+	}
+	return genericSiteAdapter{}.CrawlTasks(a, site, req)
+}
+
+func (sgccAdapter) CrawlTasks(app *App, site SiteConfig, req CrawlRequest) []CrawlTask {
+	categories := normalizeCategories(site.Categories)
+	if len(categories) == 0 {
+		categories = defaultSGCCCategories()
+	}
+	tasks := make([]CrawlTask, 0, len(categories))
+	for _, category := range categories {
+		if category.Enabled {
+			tasks = append(tasks, app.crawlSGCCCategory(site, category, req))
+		}
+	}
+	return tasks
+}
+
+func (genericSiteAdapter) CrawlTasks(app *App, site SiteConfig, req CrawlRequest) []CrawlTask {
+	return []CrawlTask{app.crawlSite(site, req)}
+}
+
+func (a *App) crawlSGCCCategory(site SiteConfig, category NoticeCategory, req CrawlRequest) (task CrawlTask) {
+	task = CrawlTask{
+		ID:           makeID(fmt.Sprintf("%s-%s-%d", site.ID, category.ID, time.Now().UnixNano())),
+		SiteID:       site.ID,
+		SiteName:     site.Name,
+		CategoryID:   category.ID,
+		CategoryName: category.Name,
+		Status:       "running",
+		StartedAt:    nowString(),
+	}
+
+	watermark := watermarkFor(site, category.ID)
+	items, nextWatermark, err := a.fetchSGCCCategory(site, category, req, watermark)
+	task.TotalCount = len(items)
+	if err != nil {
+		task.Status = "failed"
+		task.FailedCount = 1
+		task.ErrorMessage = err.Error()
+		task.FinishedAt = nowString()
+		a.recordTask(task)
+		return task
+	}
+	if len(items) == 0 {
+		task.Status = "no_updates"
+		task.FinishedAt = nowString()
+		a.updateWatermark(site.ID, nextWatermark)
+		a.recordTask(task)
+		return task
+	}
+
+	for i := range items {
+		if category.ArchiveProject {
+			a.archiveOpportunity(&items[i], category)
+		}
+	}
+	newCount, duplicateCount := a.upsertOpportunities(items)
+	task.NewCount = newCount
+	task.DuplicateCount = duplicateCount
+	task.Status = "success"
+	task.FinishedAt = nowString()
+	a.updateWatermark(site.ID, nextWatermark)
+	a.recordTask(task)
+	return task
+}
+
+func watermarkFor(site SiteConfig, categoryID string) CrawlWatermark {
+	for _, watermark := range site.Watermarks {
+		if watermark.CategoryID == categoryID {
+			return watermark
+		}
+	}
+	return CrawlWatermark{CategoryID: categoryID}
+}
+
+func (a *App) updateWatermark(siteID string, watermark CrawlWatermark) {
+	watermark.LastSuccessAt = nowString()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.state.Sites {
+		if a.state.Sites[i].ID != siteID {
+			continue
+		}
+		for j := range a.state.Sites[i].Watermarks {
+			if a.state.Sites[i].Watermarks[j].CategoryID == watermark.CategoryID {
+				a.state.Sites[i].Watermarks[j] = watermark
+				_ = a.saveLocked()
+				return
+			}
+		}
+		a.state.Sites[i].Watermarks = append(a.state.Sites[i].Watermarks, watermark)
+		_ = a.saveLocked()
+		return
+	}
 }
 
 func (a *App) fetchOpportunities(site SiteConfig, req CrawlRequest) ([]Opportunity, error) {
@@ -709,48 +1048,77 @@ func (a *App) fetchCSGOpportunities(site SiteConfig, req CrawlRequest) ([]Opport
 }
 
 func (a *App) fetchSGCCOpportunities(site SiteConfig, req CrawlRequest) ([]Opportunity, error) {
-	pageSize := 20
-	if req.Days > 30 {
-		pageSize = 50
-	}
-	payload := sgccNoteListRequest{
-		Index:           1,
-		Size:            pageSize,
-		FirstPageMenuID: sgccListSpeMenuID,
-		Key:             strings.TrimSpace(req.Keyword),
-	}
+	category := NoticeCategory{ID: "sgcc-bid", Name: "招标公告及投标邀请书", MenuID: sgccListSpeMenuID, NoticeType: "招标公告", Enabled: true, DownloadAttachments: true, ArchiveProject: true}
+	items, _, err := a.fetchSGCCCategory(site, category, req, CrawlWatermark{CategoryID: category.ID})
+	return items, err
+}
 
-	var data sgccNoteListResponse
-	if err := a.postJSON(sgccNoticeListURL, payload, &data); err != nil {
-		return nil, err
-	}
-	if !data.Successful {
-		if data.ResultHint != "" {
-			return nil, fmt.Errorf("国家电网公告接口返回失败：%s", data.ResultHint)
-		}
-		return nil, errors.New("国家电网公告接口返回失败")
-	}
-
+func (a *App) fetchSGCCCategory(site SiteConfig, category NoticeCategory, req CrawlRequest, watermark CrawlWatermark) ([]Opportunity, CrawlWatermark, error) {
+	const pageSize = 50
 	cutoff := time.Time{}
 	if req.Days > 0 {
 		cutoff = time.Now().AddDate(0, 0, -req.Days)
 	}
-
-	items := make([]Opportunity, 0, len(data.ResultValue.NoteList))
-	for _, notice := range data.ResultValue.NoteList {
-		item := sgccNoticeToOpportunity(notice, site, req)
-		if item.Title == "" {
-			continue
+	if watermark.LastNoticeTime != "" {
+		if watermarkTime, err := time.Parse("2006-01-02", watermark.LastNoticeTime); err == nil && (cutoff.IsZero() || watermarkTime.After(cutoff)) {
+			cutoff = watermarkTime
 		}
-		if !cutoff.IsZero() && item.PublishTime != "" {
-			publishedAt, err := time.Parse("2006-01-02", item.PublishTime)
-			if err == nil && publishedAt.Before(cutoff) {
+	}
+
+	items := []Opportunity{}
+	nextWatermark := watermark
+	for page := 1; page <= 100; page++ {
+		payload := sgccNoteListRequest{
+			Index:           page,
+			Size:            pageSize,
+			FirstPageMenuID: category.MenuID,
+			Key:             strings.TrimSpace(req.Keyword),
+		}
+		var data sgccNoteListResponse
+		if err := a.postJSON(sgccNoticeListURL, payload, &data); err != nil {
+			return nil, watermark, err
+		}
+		if !data.Successful {
+			if data.ResultHint != "" {
+				return nil, watermark, fmt.Errorf("国家电网公告接口返回失败：%s", data.ResultHint)
+			}
+			return nil, watermark, errors.New("国家电网公告接口返回失败")
+		}
+
+		pastBoundary := false
+		for _, notice := range data.ResultValue.NoteList {
+			item := sgccNoticeToOpportunity(notice, site, req)
+			if item.Title == "" {
 				continue
 			}
+			item.CategoryID = category.ID
+			item.CategoryName = category.Name
+			item.NoticeType = category.NoticeType
+			item.NoticeID = jsonValueString(notice.NoticeID)
+			if item.NoticeID == "" {
+				item.NoticeID = jsonValueString(notice.ID)
+			}
+			if item.PublishTime != "" {
+				publishedAt, err := time.Parse("2006-01-02", item.PublishTime)
+				if err == nil && !cutoff.IsZero() && publishedAt.Before(cutoff) {
+					pastBoundary = true
+					continue
+				}
+			}
+			if a.isKnownOpportunity(item) {
+				continue
+			}
+			items = append(items, item)
+			if nextWatermark.LastNoticeTime == "" || item.PublishTime > nextWatermark.LastNoticeTime || (item.PublishTime == nextWatermark.LastNoticeTime && item.NoticeID > nextWatermark.LastNoticeID) {
+				nextWatermark.LastNoticeTime = item.PublishTime
+				nextWatermark.LastNoticeID = item.NoticeID
+			}
 		}
-		items = append(items, item)
+		if pastBoundary || len(data.ResultValue.NoteList) < pageSize || page*pageSize >= data.ResultValue.Count {
+			break
+		}
 	}
-	return items, nil
+	return items, nextWatermark, nil
 }
 
 func (a *App) postJSON(endpoint string, payload any, target any) error {
@@ -1151,6 +1519,18 @@ func (a *App) upsertOpportunities(items []Opportunity) (int, int) {
 	return newCount, duplicateCount
 }
 
+func (a *App) isKnownOpportunity(item Opportunity) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := dedupeKey(item)
+	for _, existing := range a.state.Opportunities {
+		if dedupeKey(existing) == key && existing.ContentHash == item.ContentHash {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) recordTask(task CrawlTask) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1163,13 +1543,14 @@ func (a *App) recordTask(task CrawlTask) {
 }
 
 func dedupeKey(item Opportunity) string {
+	scope := item.SiteID + "|" + item.CategoryID
 	if item.TenderNo != "" {
-		return item.SiteID + "|no|" + item.TenderNo
+		return scope + "|no|" + item.TenderNo
 	}
 	if item.SourceURL != "" {
-		return item.SiteID + "|url|" + item.SourceURL
+		return scope + "|url|" + item.SourceURL
 	}
-	return item.SiteID + "|hash|" + item.ContentHash
+	return scope + "|hash|" + item.ContentHash
 }
 
 func stripScripts(raw string) string {

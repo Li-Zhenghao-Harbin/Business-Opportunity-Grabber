@@ -190,7 +190,7 @@ nav button.active {
 
 .schedule-row {
   display: grid;
-  grid-template-columns: auto 180px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 14px;
   align-items: end;
 }
