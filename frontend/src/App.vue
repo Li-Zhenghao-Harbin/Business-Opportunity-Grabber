@@ -254,17 +254,14 @@ async function startAutomaticMode() {
 }
 
 async function clearHistory() {
-  if (!confirm('将删除公告记录、任务日志、抓取水位及已归档文件，然后立即从头重新执行国网全自动流程，确认继续？')) return
+  if (!confirm('将删除公告记录、任务日志、抓取水位及已归档文件。清理后需点击“执行”才会重新抓取，确认继续？')) return
   autoRunning.value = true
   try {
     const result = await ClearHistory()
     selectedOpportunity.value = null
     autoSteps.value = createAutoSteps()
-    message.value = `历史已删除：${result.deletedOpportunities} 条公告、${result.deletedTasks} 条任务、${result.deletedFolders} 个归档目录。正在从头重新抓取...`
+    message.value = `历史已删除：${result.deletedOpportunities} 条公告、${result.deletedTasks} 条任务、${result.deletedFolders} 个归档目录。请点击“执行”重新抓取。`
     await refreshAll()
-    autoRunning.value = false
-    await startAutomaticMode()
-    return
   } catch (error) {
     message.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -341,28 +338,16 @@ onBeforeUnmount(removeAutoProgressListener)
     </aside>
 
     <section class="content">
-      <header class="topbar">
-        <div>
-          <h2 v-if="activeTab === 'opportunities'">公告库</h2>
-          <h2 v-else-if="activeTab === 'automatic'">全自动模式</h2>
-          <h2 v-else-if="activeTab === 'sites'">站点配置</h2>
-          <h2 v-else>任务日志</h2>
-          <p>{{ message || '通过全自动模式执行国家电网公告归档。' }}</p>
-        </div>
-      </header>
-
       <section v-if="activeTab === 'automatic'" class="workspace">
         <div class="panel automation-panel">
-          <div class="automation-head">
-            <div>
-              <h3>国家电网自动归档</h3>
-              <p>仅执行 PDF 第 1-7 页对应栏目，抓取范围使用国网站点配置。</p>
-            </div>
-            <div class="row-actions">
-              <button @click="openArchiveDirectory">打开保存目录</button>
-              <button class="danger" :disabled="autoRunning" @click="clearHistory">删除历史</button>
-            </div>
+          <div class="automation-toolbar">
+            <button class="primary" :disabled="autoRunning" @click="startAutomaticMode">
+              {{ autoRunning ? '正在执行...' : '执行' }}
+            </button>
+            <button :disabled="autoRunning" @click="openArchiveDirectory">打开保存目录</button>
+            <button class="danger" :disabled="autoRunning" @click="clearHistory">删除历史</button>
           </div>
+          <p v-if="message" class="automation-message">{{ message }}</p>
           <div class="overall-progress">
             <span>总进度</span>
             <strong>{{ autoOverallPercent }}%</strong>
@@ -388,9 +373,6 @@ onBeforeUnmount(removeAutoProgressListener)
               </div>
             </li>
           </ol>
-          <button class="primary" :disabled="autoRunning" @click="startAutomaticMode">
-            {{ autoRunning ? '正在执行...' : '执行' }}
-          </button>
         </div>
       </section>
 
@@ -463,6 +445,20 @@ onBeforeUnmount(removeAutoProgressListener)
       </section>
 
       <section v-else-if="activeTab === 'sites'" class="workspace site-workspace">
+        <div class="panel archive-panel">
+          <form class="form" @submit.prevent="saveArchiveConfig">
+            <h3>公告归档目录</h3>
+            <label>
+              下载保存位置
+              <input v-model="archive.rootPath" required placeholder="D:\\商机提取器归档" />
+            </label>
+            <div class="actions">
+              <button type="button" :disabled="loading" @click="chooseArchiveDirectory">选择目录</button>
+              <button class="primary" type="submit" :disabled="loading">保存目录</button>
+            </div>
+          </form>
+        </div>
+
         <div class="panel site-list-panel">
           <div class="section-head">
             <h3>已配置站点</h3>
@@ -541,20 +537,6 @@ onBeforeUnmount(removeAutoProgressListener)
           </section>
         </form>
 
-        <div class="panel form">
-          <form class="form" @submit.prevent="saveArchiveConfig">
-            <h3>公告归档目录</h3>
-            <label>
-              下载保存位置
-              <input v-model="archive.rootPath" required placeholder="D:\\商机提取器归档" />
-            </label>
-            <div class="actions">
-              <button type="button" :disabled="loading" @click="chooseArchiveDirectory">选择目录</button>
-              <button class="primary" type="submit" :disabled="loading">保存目录</button>
-            </div>
-          </form>
-
-        </div>
       </section>
 
       <section v-else class="workspace">
