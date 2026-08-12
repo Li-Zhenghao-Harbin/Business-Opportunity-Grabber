@@ -127,6 +127,7 @@ export namespace main {
 	export class NoticeCategory {
 	    id: string;
 	    name: string;
+	    pagePath: string;
 	    menuId: string;
 	    noticeType: string;
 	    enabled: boolean;
@@ -141,6 +142,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	        this.pagePath = source["pagePath"];
 	        this.menuId = source["menuId"];
 	        this.noticeType = source["noticeType"];
 	        this.enabled = source["enabled"];

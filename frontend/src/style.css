@@ -392,6 +392,12 @@ dd {
   gap: 12px;
 }
 
+.grid-1 {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.34fr);
+  gap: 12px;
+}
+
 .actions,
 .row-actions {
   display: flex;
@@ -442,6 +448,27 @@ dd {
   display: grid;
   gap: 10px;
   padding-top: 4px;
+}
+
+.category-settings .check span,
+.configured-paths li {
+  display: grid;
+  gap: 4px;
+}
+
+.category-settings small,
+.configured-paths span {
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.configured-paths {
+  display: grid;
+  gap: 9px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
 }
 
 .site-row span {

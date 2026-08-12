@@ -467,9 +467,19 @@ onBeforeUnmount(removeAutoProgressListener)
           <article v-for="site in sites" :key="site.id" class="site-row clickable" @click="editSite(site)">
             <div>
               <h4>{{ site.name }}</h4>
-              <p>{{ site.baseUrl }}</p>
-              <span>{{ site.siteType }} · {{ site.renderMode }} · {{ site.enabled ? '启用' : '停用' }}</span>
-              <p v-if="site.siteType === 'sgcc'">已启用栏目：{{ site.categories?.filter((item) => item.enabled).length || 0 }}</p>
+              <template v-if="site.siteType === 'sgcc'">
+                <p>国网全自动流程 · 已启用步骤：{{ site.categories?.filter((item) => item.enabled).length || 0 }}</p>
+                <ul class="configured-paths">
+                  <li v-for="category in site.categories" :key="category.id">
+                    <strong>{{ category.name }}</strong>
+                    <span>{{ category.pagePath }}</span>
+                  </li>
+                </ul>
+              </template>
+              <template v-else>
+                <p>{{ site.baseUrl }}</p>
+                <span>{{ site.siteType }} · {{ site.renderMode }} · {{ site.enabled ? '启用' : '停用' }}</span>
+              </template>
             </div>
             <button class="danger" @click.stop="removeSite(site.id)">删除</button>
           </article>
@@ -485,11 +495,11 @@ onBeforeUnmount(removeAutoProgressListener)
             站点名称
             <input v-model="siteForm.name" required placeholder="国家电网 - 招标采购公告" />
           </label>
-          <label>
+          <label v-if="siteForm.siteType !== 'sgcc'">
             入口 URL
-            <input v-model="siteForm.baseUrl" required placeholder="https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe" />
+            <input v-model="siteForm.baseUrl" required placeholder="https://example.com/notices" />
           </label>
-          <div class="grid-2">
+          <div v-if="siteForm.siteType !== 'sgcc'" class="grid-2">
             <label>
               站点类型
               <select v-model="siteForm.siteType">
@@ -506,16 +516,16 @@ onBeforeUnmount(removeAutoProgressListener)
               </select>
             </label>
           </div>
-          <div class="grid-3">
+          <div :class="siteForm.siteType === 'sgcc' ? 'grid-1' : 'grid-3'">
             <label>
               最近天数
               <input v-model.number="siteForm.dateRangeDays" min="1" type="number" />
             </label>
-            <label>
+            <label v-if="siteForm.siteType !== 'sgcc'">
               间隔毫秒
               <input v-model.number="siteForm.minIntervalMs" min="300" type="number" />
             </label>
-            <label>
+            <label v-if="siteForm.siteType !== 'sgcc'">
               重试次数
               <input v-model.number="siteForm.maxRetries" min="1" type="number" />
             </label>
@@ -529,10 +539,13 @@ onBeforeUnmount(removeAutoProgressListener)
             <button type="button" @click="resetSiteForm">取消</button>
           </div>
           <section v-if="siteForm.siteType === 'sgcc'" class="category-settings">
-            <h3>国家电网公告栏目</h3>
+            <h3>国网全自动步骤与指定路径</h3>
             <label v-for="category in siteForm.categories" :key="category.id" class="check">
               <input v-model="category.enabled" type="checkbox" />
-              {{ category.name }}
+              <span>
+                <strong>{{ category.name }}</strong>
+                <small>{{ category.pagePath }}</small>
+              </span>
             </label>
           </section>
         </form>

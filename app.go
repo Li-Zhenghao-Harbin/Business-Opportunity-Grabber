@@ -81,6 +81,7 @@ type SiteConfig struct {
 type NoticeCategory struct {
 	ID                  string `json:"id"`
 	Name                string `json:"name"`
+	PagePath            string `json:"pagePath"`
 	MenuID              string `json:"menuId"`
 	NoticeType          string `json:"noticeType"`
 	Enabled             bool   `json:"enabled"`
@@ -323,8 +324,9 @@ func (a *App) ensureBuiltInSitesLocked() {
 		}
 	}
 	for i := range a.state.Sites {
-		if a.state.Sites[i].SiteType == "sgcc" && len(a.state.Sites[i].Categories) == 0 {
-			a.state.Sites[i].Categories = defaultSGCCCategories()
+		if a.state.Sites[i].SiteType == "sgcc" {
+			a.state.Sites[i].BaseURL = defaultSGCCURL
+			a.state.Sites[i].Categories = mergeSGCCAutoCategories(a.state.Sites[i].Categories)
 		}
 	}
 }
@@ -350,13 +352,9 @@ func defaultSGCCSite() SiteConfig {
 
 func defaultSGCCCategories() []NoticeCategory {
 	return []NoticeCategory{
-		{ID: "sgcc-single-source", Name: "单一来源采购事前公示", MenuID: "2019102186483919", NoticeType: "单一来源公示", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
-		{ID: "sgcc-annual-plan", Name: "年度采购计划预安排", MenuID: "2020052000175277", NoticeType: "年度采购计划", Enabled: true, DownloadAttachments: false, ArchiveProject: true},
-		{ID: "sgcc-prequalification", Name: "资格预审公告", MenuID: "2018032700290425", NoticeType: "资格预审", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
-		{ID: "sgcc-bid", Name: "招标公告及投标邀请书", MenuID: "2018032700291334", NoticeType: "招标公告", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
-		{ID: "sgcc-procurement", Name: "采购公告", MenuID: "2018032900295987", NoticeType: "采购公告", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
-		{ID: "sgcc-winners", Name: "推荐中标候选人公示", MenuID: "2018060501171107", NoticeType: "推荐中标候选人公示", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
-		{ID: "sgcc-qualification", Name: "资质能力核实", MenuID: "2019071434441442", NoticeType: "资质能力核实", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-single-source", Name: "1.1 单一来源采购事前公示", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-com/2021071678253350_1_2019102186483919", MenuID: "2019102186483919", NoticeType: "单一来源公示", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-annual-plan", Name: "1.2 年度采购计划预安排", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-com/2021071678253350_1_2020052000175277", MenuID: "2020052000175277", NoticeType: "年度采购计划", Enabled: true, DownloadAttachments: false, ArchiveProject: true},
+		{ID: "sgcc-prequalification", Name: "2.1 资格预审公告", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe/2018032600289606_1_2018032700290425", MenuID: "2018032700290425", NoticeType: "资格预审", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
 	}
 }
 
@@ -466,11 +464,14 @@ func (a *App) SaveSite(site SiteConfig) (SiteConfig, error) {
 	if site.Name == "" {
 		return SiteConfig{}, errors.New("站点名称不能为空")
 	}
-	if _, err := url.ParseRequestURI(site.BaseURL); err != nil {
-		return SiteConfig{}, errors.New("入口 URL 格式不正确")
-	}
 	if site.SiteType == "" {
 		site.SiteType = "custom"
+	}
+	if site.SiteType == "sgcc" {
+		site.BaseURL = defaultSGCCURL
+		site.Categories = mergeSGCCAutoCategories(site.Categories)
+	} else if _, err := url.ParseRequestURI(site.BaseURL); err != nil {
+		return SiteConfig{}, errors.New("入口 URL 格式不正确")
 	}
 	if site.RenderMode == "" {
 		site.RenderMode = "http"
@@ -484,7 +485,9 @@ func (a *App) SaveSite(site SiteConfig) (SiteConfig, error) {
 	if site.MaxRetries <= 0 {
 		site.MaxRetries = 3
 	}
-	site.Categories = normalizeCategories(site.Categories)
+	if site.SiteType != "sgcc" {
+		site.Categories = normalizeCategories(site.Categories)
+	}
 
 	now := nowString()
 	if site.ID == "" {
@@ -773,6 +776,20 @@ func normalizeCategories(categories []NoticeCategory) []NoticeCategory {
 		cleaned = append(cleaned, category)
 	}
 	return cleaned
+}
+
+func mergeSGCCAutoCategories(categories []NoticeCategory) []NoticeCategory {
+	existing := map[string]NoticeCategory{}
+	for _, category := range categories {
+		existing[category.ID] = category
+	}
+	configured := defaultSGCCCategories()
+	for i := range configured {
+		if current, ok := existing[configured[i].ID]; ok {
+			configured[i].Enabled = current.Enabled
+		}
+	}
+	return configured
 }
 
 func (a *App) crawlSite(site SiteConfig, req CrawlRequest) (task CrawlTask) {

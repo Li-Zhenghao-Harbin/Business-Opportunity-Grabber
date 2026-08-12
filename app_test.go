@@ -61,11 +61,11 @@ func TestDefaultSitesIncludesCSG(t *testing.T) {
 
 func TestDefaultSGCCSiteIncludesP0Categories(t *testing.T) {
 	site := defaultSGCCSite()
-	if len(site.Categories) != 7 {
-		t.Fatalf("expected 7 SGCC categories, got %d", len(site.Categories))
+	if len(site.Categories) != 3 {
+		t.Fatalf("expected 3 SGCC auto categories, got %d", len(site.Categories))
 	}
-	if site.Categories[3].ID != "sgcc-bid" || site.Categories[3].MenuID != sgccListSpeMenuID {
-		t.Fatalf("unexpected bid category: %#v", site.Categories[3])
+	if site.Categories[0].PagePath == "" || site.Categories[1].PagePath == "" || site.Categories[2].PagePath == "" {
+		t.Fatal("expected each SGCC auto category to include its PDF page path")
 	}
 }
 
