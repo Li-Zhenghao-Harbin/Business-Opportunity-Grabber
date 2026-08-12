@@ -1,12 +1,12 @@
 export namespace main {
-	
+
 	export class ArchiveConfig {
 	    rootPath: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ArchiveConfig(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.rootPath = source["rootPath"];
@@ -20,11 +20,11 @@ export namespace main {
 	    hash: string;
 	    status: string;
 	    errorReason: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Attachment(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
@@ -40,11 +40,11 @@ export namespace main {
 	    siteIds: string[];
 	    keyword: string;
 	    days: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new CrawlRequest(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.siteIds = source["siteIds"];
@@ -66,11 +66,11 @@ export namespace main {
 	    duplicateCount: number;
 	    failedCount: number;
 	    errorMessage: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new CrawlTask(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -93,11 +93,11 @@ export namespace main {
 	    lastSuccessAt: string;
 	    lastNoticeTime: string;
 	    lastNoticeId: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new CrawlWatermark(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.categoryId = source["categoryId"];
@@ -111,11 +111,11 @@ export namespace main {
 	    enabledSiteCount: number;
 	    opportunityCount: number;
 	    lastTaskCount: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Dashboard(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.siteCount = source["siteCount"];
@@ -128,11 +128,11 @@ export namespace main {
 	    deletedOpportunities: number;
 	    deletedTasks: number;
 	    deletedFolders: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new HistoryClearResult(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.deletedOpportunities = source["deletedOpportunities"];
@@ -148,11 +148,11 @@ export namespace main {
 	    enabled: boolean;
 	    downloadAttachments: boolean;
 	    archiveProject: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new NoticeCategory(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -182,6 +182,7 @@ export namespace main {
 	    categoryId: string;
 	    categoryName: string;
 	    noticeId: string;
+	    detailId: string;
 	    processStatus: string;
 	    archivePath: string;
 	    detailFetchedAt: string;
@@ -189,11 +190,11 @@ export namespace main {
 	    attachments: Attachment[];
 	    createdAt: string;
 	    updatedAt: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Opportunity(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -213,6 +214,7 @@ export namespace main {
 	        this.categoryId = source["categoryId"];
 	        this.categoryName = source["categoryName"];
 	        this.noticeId = source["noticeId"];
+	        this.detailId = source["detailId"];
 	        this.processStatus = source["processStatus"];
 	        this.archivePath = source["archivePath"];
 	        this.detailFetchedAt = source["detailFetchedAt"];
@@ -221,7 +223,7 @@ export namespace main {
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -243,11 +245,11 @@ export namespace main {
 	export class OpportunityQuery {
 	    search: string;
 	    siteId: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new OpportunityQuery(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.search = source["search"];
@@ -261,11 +263,11 @@ export namespace main {
 	    dailyTime: string;
 	    lastRunAt: string;
 	    nextRunAt: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ScheduleConfig(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];
@@ -292,11 +294,11 @@ export namespace main {
 	    watermarks: CrawlWatermark[];
 	    createdAt: string;
 	    updatedAt: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new SiteConfig(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -315,7 +317,7 @@ export namespace main {
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;

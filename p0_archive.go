@@ -12,10 +12,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
-var attachmentLinkRE = regexp.MustCompile(`(?is)<a\b[^>]*href=["']?([^"'\s>]+)["']?[^>]*>(.*?)</a>`)
 var invalidFileNameRE = regexp.MustCompile(`[\\/:*?"<>|\x00-\x1f]+`)
+var attachmentLinkRE = regexp.MustCompile(`(?is)<a\b[^>]*href=["']?([^"'\s>]+)["']?[^>]*>(.*?)</a>`)
+
+type sgccArchiveDetail struct {
+	Body        string
+	Attachments []sgccAttachmentSource
+}
+
+type sgccAttachmentSource struct {
+	Name string
+	URL  string
+}
 
 func (a *App) archiveOpportunity(item *Opportunity, category NoticeCategory) {
 	a.archiveOpportunityWithProgress(item, category, nil)
@@ -43,11 +54,11 @@ func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeC
 		report("创建文件夹", true, "公告归档目录已创建")
 	}
 
-	rawDetail, err := a.fetchPublicDocument(item.SourceURL)
-	detailAvailable := err == nil && isUsefulNoticeHTML(string(rawDetail), *item)
+	detail, err := a.fetchArchiveDetail(*item, category)
+	detailAvailable := err == nil && strings.TrimSpace(detail.Body) != ""
 	body := item.Content
 	if detailAvailable {
-		body = documentTextFromHTML(string(rawDetail))
+		body = detail.Body
 		item.DetailFetchedAt = nowString()
 	}
 	if report != nil {
@@ -75,7 +86,7 @@ func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeC
 		if report != nil {
 			report("下载附件", false, "正在下载公告附件")
 		}
-		attachments = a.archiveAttachments(rawDetail, item.SourceURL, archivePath)
+		attachments = a.downloadAttachments(detail.Attachments, archivePath)
 		if report != nil {
 			report("下载附件", true, "公告附件下载完成")
 		}
@@ -94,12 +105,245 @@ func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeC
 	item.ArchiveError = ""
 }
 
+func (a *App) fetchArchiveDetail(item Opportunity, category NoticeCategory) (sgccArchiveDetail, error) {
+	if item.SiteID == "sgcc-list-spe" {
+		switch category.ID {
+		case "sgcc-single-source":
+			return a.fetchSGCCSingleSourceDetail(item)
+		case "sgcc-annual-plan":
+			return a.fetchSGCCAnnualPlanDetail(item)
+		case "sgcc-prequalification":
+			return a.fetchSGCCBidDetail(item)
+		}
+	}
+	raw, err := a.fetchPublicDocument(item.SourceURL)
+	if err != nil {
+		return sgccArchiveDetail{}, err
+	}
+	if !isUsefulNoticeHTML(string(raw), item) {
+		return sgccArchiveDetail{}, fmt.Errorf("详情页未返回可识别的公开正文")
+	}
+	return sgccArchiveDetail{Body: documentTextFromHTML(string(raw)), Attachments: htmlAttachmentSources(raw, item.SourceURL)}, nil
+}
+
+func (a *App) fetchSGCCSingleSourceDetail(item Opportunity) (sgccArchiveDetail, error) {
+	ids := cleanList([]string{item.DetailID, item.NoticeID})
+	if len(ids) == 0 {
+		return sgccArchiveDetail{}, fmt.Errorf("单一来源公告缺少详情标识")
+	}
+	var response struct {
+		Successful  bool   `json:"successful"`
+		ResultHint  string `json:"resultHint"`
+		ResultValue struct {
+			PurSingleList []struct {
+				PlanName       string `json:"planname"`
+				ProjectName    string `json:"projectname"`
+				PurOrgName     string `json:"purorgname"`
+				PublishOrgName string `json:"publishorgname"`
+				PlanCode       string `json:"plancode"`
+				MinCatName     string `json:"mincatname"`
+				SupplierName   string `json:"suppliername"`
+				Note           string `json:"note"`
+			} `json:"purSingleList"`
+			FileList []struct {
+				Path string `json:"publicityFilePath"`
+				Name string `json:"publicityFileName"`
+			} `json:"fileList"`
+		} `json:"resultValue"`
+	}
+	var lastErr error
+	for _, id := range ids {
+		response = struct {
+			Successful  bool   `json:"successful"`
+			ResultHint  string `json:"resultHint"`
+			ResultValue struct {
+				PurSingleList []struct {
+					PlanName       string `json:"planname"`
+					ProjectName    string `json:"projectname"`
+					PurOrgName     string `json:"purorgname"`
+					PublishOrgName string `json:"publishorgname"`
+					PlanCode       string `json:"plancode"`
+					MinCatName     string `json:"mincatname"`
+					SupplierName   string `json:"suppliername"`
+					Note           string `json:"note"`
+				} `json:"purSingleList"`
+				FileList []struct {
+					Path string `json:"publicityFilePath"`
+					Name string `json:"publicityFileName"`
+				} `json:"fileList"`
+			} `json:"resultValue"`
+		}{}
+		if err := a.postJSON(sgccCoreURL+"purNotice/getPurSingle", map[string]any{"index": 1, "size": 100, "singleSourceId": id}, &response); err != nil {
+			lastErr = err
+			continue
+		}
+		if response.Successful && len(response.ResultValue.PurSingleList) > 0 {
+			break
+		}
+		lastErr = fmt.Errorf("单一来源详情接口未返回正文：%s", response.ResultHint)
+	}
+	if !response.Successful || len(response.ResultValue.PurSingleList) == 0 {
+		return sgccArchiveDetail{}, lastErr
+	}
+	lines := make([]string, 0, len(response.ResultValue.PurSingleList)*6)
+	for index, record := range response.ResultValue.PurSingleList {
+		if index == 0 {
+			lines = append(lines, cleanList([]string{"公示名称：" + record.PlanName, "发布单位：" + record.PublishOrgName, "采购单位：" + record.PurOrgName, "采购编号：" + record.PlanCode, "公示说明：" + record.Note})...)
+		}
+		lines = append(lines, cleanList([]string{fmt.Sprintf("项目 %d：%s", index+1, record.ProjectName), "采购内容：" + record.MinCatName, "供应商：" + record.SupplierName})...)
+	}
+	return sgccArchiveDetail{Body: strings.Join(lines, "\n"), Attachments: singleSourceAttachments(response.ResultValue.FileList)}, nil
+}
+
+func singleSourceAttachments(files []struct {
+	Path string `json:"publicityFilePath"`
+	Name string `json:"publicityFileName"`
+}) []sgccAttachmentSource {
+	attachments := make([]sgccAttachmentSource, 0, len(files))
+	for _, file := range files {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		attachments = append(attachments, sgccAttachmentSource{Name: file.Name, URL: sgccCoreURL + "purStd/downPurSingleFiles?path=" + url.QueryEscape(file.Path) + "&name=" + url.QueryEscape(file.Name)})
+	}
+	return attachments
+}
+
+func (a *App) fetchSGCCAnnualPlanDetail(item Opportunity) (sgccArchiveDetail, error) {
+	id := firstNonEmpty(item.DetailID, item.NoticeID)
+	if id == "" {
+		return sgccArchiveDetail{}, fmt.Errorf("年度采购计划缺少详情标识")
+	}
+	var response struct {
+		Successful  bool   `json:"successful"`
+		ResultHint  string `json:"resultHint"`
+		ResultValue struct {
+			PurplanList []map[string]any `json:"purplanList"`
+			PurplanYear map[string]any   `json:"purplanYear"`
+		} `json:"resultValue"`
+	}
+	if err := a.postJSON(sgccCoreURL+"purNotice/getPurplan", map[string]any{"index": 1, "size": 100, "prePurplanYearId": id, "projectType": "", "month": ""}, &response); err != nil {
+		return sgccArchiveDetail{}, err
+	}
+	if !response.Successful {
+		return sgccArchiveDetail{}, fmt.Errorf("年度采购计划详情接口未返回正文：%s", response.ResultHint)
+	}
+	lines := flattenRecord("年度采购计划", response.ResultValue.PurplanYear)
+	for index, record := range response.ResultValue.PurplanList {
+		lines = append(lines, flattenRecord(fmt.Sprintf("计划项目 %d", index+1), record)...)
+	}
+	if len(lines) == 0 {
+		return sgccArchiveDetail{}, fmt.Errorf("年度采购计划详情接口未返回可用内容")
+	}
+	return sgccArchiveDetail{Body: strings.Join(lines, "\n")}, nil
+}
+
+func (a *App) fetchSGCCBidDetail(item Opportunity) (sgccArchiveDetail, error) {
+	id := firstNonEmpty(item.DetailID, item.NoticeID)
+	if id == "" {
+		return sgccArchiveDetail{}, fmt.Errorf("资格预审公告缺少详情标识")
+	}
+	var response struct {
+		Successful  bool   `json:"successful"`
+		ResultHint  string `json:"resultHint"`
+		ResultValue struct {
+			Notice   map[string]any `json:"notice"`
+			FileFlag any            `json:"fileFlag"`
+		} `json:"resultValue"`
+	}
+	if err := a.postJSON(sgccCoreURL+"index/getNoticeBid", id, &response); err != nil {
+		return sgccArchiveDetail{}, err
+	}
+	if !response.Successful || len(response.ResultValue.Notice) == 0 {
+		return sgccArchiveDetail{}, fmt.Errorf("资格预审详情接口未返回正文：%s", response.ResultHint)
+	}
+	lines := flattenRecord("资格预审公告", response.ResultValue.Notice)
+	body := strings.Join(lines, "\n")
+	if content, ok := mapString(response.ResultValue.Notice, "CONT", "CONTENT", "NOTICE_CONTENT"); ok {
+		body = documentTextFromHTML(content)
+		if body == "" {
+			body = strings.Join(lines, "\n")
+		}
+	}
+	attachments := []sgccAttachmentSource{}
+	if sgccFileAvailable(response.ResultValue.FileFlag) {
+		detailID, _ := mapString(response.ResultValue.Notice, "NOTICE_DET_ID", "NOTICE_DETAIL_ID", "ID")
+		attachmentURL := sgccCoreURL + "index/downLoadBid?noticeId=" + url.QueryEscape(id)
+		if detailID != "" {
+			attachmentURL += "&noticeDetId=" + url.QueryEscape(detailID)
+		}
+		attachments = append(attachments, sgccAttachmentSource{Name: "公告附件.zip", URL: attachmentURL})
+	}
+	return sgccArchiveDetail{Body: body, Attachments: attachments}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mapString(record map[string]any, names ...string) (string, bool) {
+	for _, name := range names {
+		if value, ok := record[name]; ok {
+			text := strings.TrimSpace(fmt.Sprint(value))
+			if text != "" && text != "<nil>" {
+				return text, true
+			}
+		}
+	}
+	return "", false
+}
+
+func flattenRecord(title string, record map[string]any) []string {
+	if len(record) == 0 {
+		return nil
+	}
+	lines := []string{title}
+	for _, key := range []string{"PLAN_NAME", "PLANNAME", "PROJECT_NAME", "PROJECTNAME", "PUR_ORG_NAME", "PURORGNAME", "PUBLISH_ORG_NAME", "PUBLISHORGNAME", "PLAN_CODE", "PLANCODE", "NOTICE_TYPE_NAME", "NOTE", "CONTENT", "CONT"} {
+		if value, ok := mapString(record, key); ok {
+			value = documentTextFromHTML(value)
+			if value != "" {
+				lines = append(lines, key+"："+value)
+			}
+		}
+	}
+	return cleanList(lines)
+}
+
+func sgccFileAvailable(value any) bool {
+	text := strings.TrimSpace(fmt.Sprint(value))
+	return text == "1" || strings.EqualFold(text, "true")
+}
+
+func htmlAttachmentSources(raw []byte, sourceURL string) []sgccAttachmentSource {
+	base, err := url.Parse(sourceURL)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	attachments := []sgccAttachmentSource{}
+	for _, match := range attachmentLinkRE.FindAllStringSubmatch(string(raw), -1) {
+		href := html.UnescapeString(strings.TrimSpace(match[1]))
+		if !looksLikeAttachment(href) || seen[href] {
+			continue
+		}
+		seen[href] = true
+		resolved := resolveURL(base, href)
+		attachments = append(attachments, sgccAttachmentSource{Name: attachmentName(match[2], resolved), URL: resolved})
+	}
+	return attachments
+}
+
 func (a *App) restoreMissingArchives(site SiteConfig, category NoticeCategory, days int) int {
 	cutoffDate := cutoffDateForDays(days)
 	a.mu.Lock()
 	candidates := make([]Opportunity, 0)
 	for _, item := range a.state.Opportunities {
-		if item.SiteID != site.ID || item.CategoryID != category.ID || !isWithinArchiveWindow(item, cutoffDate) || !archiveIsMissing(item) {
+		if item.SiteID != site.ID || item.CategoryID != category.ID || !isWithinArchiveWindow(item, cutoffDate) || !archiveNeedsRefresh(item) {
 			continue
 		}
 		candidates = append(candidates, item)
@@ -139,6 +383,10 @@ func archiveIsMissing(item Opportunity) bool {
 	return err != nil
 }
 
+func archiveNeedsRefresh(item Opportunity) bool {
+	return item.DetailFetchedAt == "" || archiveIsMissing(item)
+}
+
 func (a *App) replaceArchivedOpportunity(updated Opportunity) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -152,37 +400,20 @@ func (a *App) replaceArchivedOpportunity(updated Opportunity) {
 	}
 }
 
-func (a *App) archiveAttachments(raw []byte, sourceURL string, archivePath string) []Attachment {
-	base, err := url.Parse(sourceURL)
-	if err != nil {
-		return nil
-	}
-	attachmentsPath := filepath.Join(archivePath, "attachments")
-	seen := map[string]bool{}
-	attachments := []Attachment{}
-	for _, match := range attachmentLinkRE.FindAllStringSubmatch(string(raw), -1) {
-		href := html.UnescapeString(strings.TrimSpace(match[1]))
-		if !looksLikeAttachment(href) || seen[href] {
-			continue
-		}
-		seen[href] = true
-		resolved := resolveURL(base, href)
-		name := attachmentName(match[2], resolved)
-		attachment := Attachment{Name: name, SourceURL: resolved, Status: "待下载"}
-		content, err := a.fetchPublicDocument(resolved)
+func (a *App) downloadAttachments(sources []sgccAttachmentSource, archivePath string) []Attachment {
+	attachments := make([]Attachment, 0, len(sources))
+	for index, source := range sources {
+		name := attachmentName(source.Name, source.URL)
+		name = uniqueAttachmentName(archivePath, name, index)
+		attachment := Attachment{Name: name, SourceURL: source.URL, Status: "待下载"}
+		content, err := a.fetchAttachmentDocument(source.URL)
 		if err != nil {
 			attachment.Status = "下载失败"
 			attachment.ErrorReason = err.Error()
 			attachments = append(attachments, attachment)
 			continue
 		}
-		if err := os.MkdirAll(attachmentsPath, 0755); err != nil {
-			attachment.Status = "下载失败"
-			attachment.ErrorReason = err.Error()
-			attachments = append(attachments, attachment)
-			continue
-		}
-		localPath := filepath.Join(attachmentsPath, name)
+		localPath := filepath.Join(archivePath, name)
 		if err := os.WriteFile(localPath, content, 0644); err != nil {
 			attachment.Status = "下载失败"
 			attachment.ErrorReason = err.Error()
@@ -197,6 +428,18 @@ func (a *App) archiveAttachments(raw []byte, sourceURL string, archivePath strin
 		attachments = append(attachments, attachment)
 	}
 	return attachments
+}
+
+func uniqueAttachmentName(archivePath string, name string, index int) string {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	extension := filepath.Ext(name)
+	if base == "" {
+		base = "附件"
+	}
+	if index > 0 {
+		return trimFileName(fmt.Sprintf("%s_%d%s", base, index+1, extension), 120)
+	}
+	return name
 }
 
 func (a *App) fetchPublicDocument(sourceURL string) ([]byte, error) {
@@ -220,6 +463,37 @@ func (a *App) fetchPublicDocument(sourceURL string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(response.Body, 25*1024*1024))
 }
 
+func (a *App) fetchAttachmentDocument(sourceURL string) ([]byte, error) {
+	if strings.TrimSpace(sourceURL) == "" {
+		return nil, fmt.Errorf("附件地址为空")
+	}
+	request, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 OpportunityCrawler/0.2")
+	request.Header.Set("Accept", "application/octet-stream,*/*")
+	request.Header.Set("Referer", defaultSGCCURL)
+	client := &http.Client{Timeout: 5 * time.Minute}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("附件下载失败：HTTP %d", response.StatusCode)
+	}
+	const maxAttachmentSize = 512 * 1024 * 1024
+	content, err := io.ReadAll(io.LimitReader(response.Body, maxAttachmentSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > maxAttachmentSize {
+		return nil, fmt.Errorf("附件超过 512 MB 限制")
+	}
+	return content, nil
+}
+
 func archiveFolderName(item Opportunity) string {
 	date := item.PublishTime
 	if date == "" {
@@ -229,7 +503,7 @@ func archiveFolderName(item Opportunity) string {
 	if name == "" {
 		name = "未命名公告"
 	}
-	return trimFileName(date+"_"+name, 140)
+	return trimFileName(date+name, 140)
 }
 
 func attachmentName(anchorText string, sourceURL string) string {

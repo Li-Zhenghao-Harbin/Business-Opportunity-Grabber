@@ -79,6 +79,41 @@ func TestDateCutoffIncludesCurrentDay(t *testing.T) {
 	}
 }
 
+func TestLiveSingleSourceArchiveDetail(t *testing.T) {
+	if os.Getenv("SGCC_LIVE_DETAIL") != "1" {
+		t.Skip("live detail verification is opt-in")
+	}
+	app := NewApp()
+	detail, err := app.fetchSGCCSingleSourceDetail(Opportunity{DetailID: "2607249458694064"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail.Body, "安徽淮南寿县丰庄") {
+		t.Fatalf("expected page detail content, got %q", detail.Body)
+	}
+	if len(detail.Attachments) == 0 || !strings.Contains(detail.Attachments[0].Name, "专业论证意见") {
+		t.Fatalf("expected listed attachment sources, got %#v", detail.Attachments)
+	}
+}
+
+func TestArchiveNeedsRefreshWhenDetailWasNeverFetched(t *testing.T) {
+	root := t.TempDir()
+	item := Opportunity{Title: "测试公告", ArchivePath: root}
+	if !archiveNeedsRefresh(item) {
+		t.Fatal("archive without fetched detail must be refreshed")
+	}
+	item.DetailFetchedAt = nowString()
+	if !archiveNeedsRefresh(item) {
+		t.Fatal("archive without Word document must be refreshed")
+	}
+	if _, err := writeNoticeDocx(root, item, "正文"); err != nil {
+		t.Fatal(err)
+	}
+	if archiveNeedsRefresh(item) {
+		t.Fatal("complete archive should not need refresh")
+	}
+}
+
 func TestNextRunAtDaily(t *testing.T) {
 	now := time.Date(2026, time.August, 11, 10, 30, 0, 0, time.Local)
 	value := nextRunAt(now, ScheduleConfig{Mode: "daily", DailyTime: "09:00"})

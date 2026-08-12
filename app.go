@@ -28,6 +28,7 @@ const defaultSGCCURL = "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe"
 const defaultCSGURL = "https://www.bidding.csg.cn/zbcg/index.jhtml"
 const crawlRequestTimeout = 30 * time.Second
 const sgccNoticeListURL = "https://ecp.sgcc.com.cn/ecp2.0/ecpwcmcore/index/noteList"
+const sgccCoreURL = "https://ecp.sgcc.com.cn/ecp2.0/ecpwcmcore/"
 const sgccListSpeMenuID = "2018032700291334"
 
 var (
@@ -129,6 +130,7 @@ type Opportunity struct {
 	CategoryID      string       `json:"categoryId"`
 	CategoryName    string       `json:"categoryName"`
 	NoticeID        string       `json:"noticeId"`
+	DetailID        string       `json:"detailId"`
 	ProcessStatus   string       `json:"processStatus"`
 	ArchivePath     string       `json:"archivePath"`
 	DetailFetchedAt string       `json:"detailFetchedAt"`
@@ -1358,9 +1360,9 @@ func sgccNoticeToOpportunity(notice sgccNotice, site SiteConfig, req CrawlReques
 		noticeID = jsonValueString(notice.ID)
 	}
 	docID := jsonValueString(notice.FirstPageDocID)
-	routeDocID := noticeID
+	routeDocID := docID
 	if routeDocID == "" {
-		routeDocID = docID
+		routeDocID = noticeID
 	}
 	menuID := jsonValueString(notice.FirstPageMenuID)
 	if menuID == "" {
@@ -1390,6 +1392,7 @@ func sgccNoticeToOpportunity(notice sgccNotice, site SiteConfig, req CrawlReques
 		Deadline:        notice.TopEndTime,
 		SourceURL:       sourceURL,
 		Content:         content,
+		DetailID:        docID,
 		MatchedKeywords: matchKeywords(notice.Title+" "+notice.Code+" "+notice.PublishOrgName+" "+content, site, req),
 		CreatedAt:       nowString(),
 		UpdatedAt:       nowString(),
