@@ -56,11 +56,10 @@ type sgccAdapter struct{}
 type genericSiteAdapter struct{}
 
 type AppState struct {
-	Sites         []SiteConfig   `json:"sites"`
-	Opportunities []Opportunity  `json:"opportunities"`
-	Tasks         []CrawlTask    `json:"tasks"`
-	Schedule      ScheduleConfig `json:"schedule"`
-	Archive       ArchiveConfig  `json:"archive"`
+	Sites         []SiteConfig  `json:"sites"`
+	Opportunities []Opportunity `json:"opportunities"`
+	Tasks         []CrawlTask   `json:"tasks"`
+	Archive       ArchiveConfig `json:"archive"`
 }
 
 type SiteConfig struct {
@@ -70,8 +69,6 @@ type SiteConfig struct {
 	BaseURL       string           `json:"baseUrl"`
 	Enabled       bool             `json:"enabled"`
 	RenderMode    string           `json:"renderMode"`
-	Keywords      []string         `json:"keywords"`
-	Regions       []string         `json:"regions"`
 	DateRangeDays int              `json:"dateRangeDays"`
 	MinIntervalMS int              `json:"minIntervalMs"`
 	MaxRetries    int              `json:"maxRetries"`
@@ -173,15 +170,6 @@ type HistoryClearResult struct {
 	DeletedFolders       int `json:"deletedFolders"`
 }
 
-type ScheduleConfig struct {
-	Enabled         bool   `json:"enabled"`
-	Mode            string `json:"mode"`
-	IntervalMinutes int    `json:"intervalMinutes"`
-	DailyTime       string `json:"dailyTime"`
-	LastRunAt       string `json:"lastRunAt"`
-	NextRunAt       string `json:"nextRunAt"`
-}
-
 type Dashboard struct {
 	SiteCount        int `json:"siteCount"`
 	EnabledSiteCount int `json:"enabledSiteCount"`
@@ -191,7 +179,6 @@ type Dashboard struct {
 
 type CrawlRequest struct {
 	SiteIDs []string `json:"siteIds"`
-	Keyword string   `json:"keyword"`
 	Days    int      `json:"days"`
 }
 
@@ -248,7 +235,6 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.initStore(); err != nil {
 		fmt.Println("init store:", err)
 	}
-	go a.schedulerLoop(ctx)
 }
 
 func (a *App) initStore() error {
@@ -272,12 +258,10 @@ func (a *App) initStore() error {
 			a.normalizeCollectionsLocked()
 			a.ensureBuiltInSitesLocked()
 			a.normalizeArchiveLocked()
-			a.normalizeScheduleLocked()
 			return a.saveLocked()
 		}
 		a.state = AppState{Sites: defaultSites(), Opportunities: []Opportunity{}, Tasks: []CrawlTask{}, Archive: defaultArchiveConfig()}
 		a.normalizeArchiveLocked()
-		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
 
@@ -288,7 +272,6 @@ func (a *App) initStore() error {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		a.state = AppState{Sites: defaultSites(), Opportunities: []Opportunity{}, Tasks: []CrawlTask{}, Archive: defaultArchiveConfig()}
 		a.normalizeArchiveLocked()
-		a.normalizeScheduleLocked()
 		return a.saveLocked()
 	}
 	if err := json.Unmarshal(raw, &a.state); err != nil {
@@ -297,7 +280,6 @@ func (a *App) initStore() error {
 	a.normalizeCollectionsLocked()
 	a.ensureBuiltInSitesLocked()
 	a.normalizeArchiveLocked()
-	a.normalizeScheduleLocked()
 	return a.saveLocked()
 }
 
@@ -356,8 +338,6 @@ func defaultSGCCSite() SiteConfig {
 		BaseURL:       defaultSGCCURL,
 		Enabled:       true,
 		RenderMode:    "http",
-		Keywords:      []string{"招标", "采购", "项目", "电网"},
-		Regions:       []string{},
 		DateRangeDays: 7,
 		MinIntervalMS: 1500,
 		MaxRetries:    3,
@@ -397,8 +377,6 @@ func defaultCSGSite() SiteConfig {
 		BaseURL:       defaultCSGURL,
 		Enabled:       true,
 		RenderMode:    "http",
-		Keywords:      []string{"招标", "采购", "公告", "南方电网"},
-		Regions:       []string{},
 		DateRangeDays: 7,
 		MinIntervalMS: 1500,
 		MaxRetries:    3,
@@ -506,8 +484,6 @@ func (a *App) SaveSite(site SiteConfig) (SiteConfig, error) {
 	if site.MaxRetries <= 0 {
 		site.MaxRetries = 3
 	}
-	site.Keywords = cleanList(site.Keywords)
-	site.Regions = cleanList(site.Regions)
 	site.Categories = normalizeCategories(site.Categories)
 
 	now := nowString()
@@ -542,13 +518,6 @@ func (a *App) DeleteSite(id string) error {
 		}
 	}
 	return errors.New("未找到站点")
-}
-
-func (a *App) RunCrawl(req CrawlRequest) ([]CrawlTask, error) {
-	a.crawlMu.Lock()
-	defer a.crawlMu.Unlock()
-
-	return a.runCrawl(req)
 }
 
 func (a *App) RunSGCCAutoPages1To7() ([]CrawlTask, error) {
@@ -689,74 +658,6 @@ func isWithinDirectory(target string, root string) bool {
 	return err == nil && relative != "." && !strings.HasPrefix(relative, "..") && !filepath.IsAbs(relative)
 }
 
-func (a *App) runCrawl(req CrawlRequest) ([]CrawlTask, error) {
-	a.mu.Lock()
-	targets := a.resolveTargetsLocked(req.SiteIDs)
-	a.mu.Unlock()
-
-	if len(targets) == 0 {
-		return nil, errors.New("没有可抓取的启用站点")
-	}
-
-	var tasks []CrawlTask
-	for _, site := range targets {
-		tasks = append(tasks, a.crawlSiteTasks(site, req)...)
-	}
-	return tasks, nil
-}
-
-func (a *App) GetSchedule() ScheduleConfig {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.normalizeScheduleLocked()
-	return a.state.Schedule
-}
-
-func (a *App) SaveSchedule(schedule ScheduleConfig) (ScheduleConfig, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if schedule.Mode == "" {
-		schedule.Mode = "interval"
-	}
-	if schedule.Mode != "interval" && schedule.Mode != "daily" {
-		return ScheduleConfig{}, errors.New("定时模式必须为 interval 或 daily")
-	}
-	if schedule.Mode == "daily" && !validDailyTime(schedule.DailyTime) {
-		return ScheduleConfig{}, errors.New("每日执行时间格式应为 HH:MM")
-	}
-	if schedule.IntervalMinutes <= 0 {
-		schedule.IntervalMinutes = 60
-	}
-	if schedule.IntervalMinutes < 5 {
-		return ScheduleConfig{}, errors.New("定时间隔不能小于 5 分钟")
-	}
-	if schedule.IntervalMinutes > 1440 {
-		return ScheduleConfig{}, errors.New("定时间隔不能大于 1440 分钟")
-	}
-
-	existing := a.state.Schedule
-	schedule.LastRunAt = existing.LastRunAt
-	if schedule.Enabled {
-		changed := !existing.Enabled || existing.IntervalMinutes != schedule.IntervalMinutes || existing.Mode != schedule.Mode || existing.DailyTime != schedule.DailyTime || strings.TrimSpace(schedule.NextRunAt) == ""
-		if changed {
-			schedule.NextRunAt = nextRunAt(time.Now(), schedule)
-		} else {
-			schedule.NextRunAt = existing.NextRunAt
-		}
-	} else {
-		schedule.NextRunAt = ""
-	}
-
-	a.state.Schedule = schedule
-	a.normalizeScheduleLocked()
-	if err := a.saveLocked(); err != nil {
-		return ScheduleConfig{}, err
-	}
-	return a.state.Schedule, nil
-}
-
 func (a *App) ListTasks() []CrawlTask {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -852,107 +753,6 @@ func (a *App) RetryArchive(opportunityID string) (Opportunity, error) {
 	return Opportunity{}, errors.New("公告已不存在")
 }
 
-func (a *App) resolveTargetsLocked(ids []string) []SiteConfig {
-	idSet := map[string]bool{}
-	for _, id := range ids {
-		idSet[id] = true
-	}
-
-	var targets []SiteConfig
-	for _, site := range a.state.Sites {
-		if !site.Enabled {
-			continue
-		}
-		if len(idSet) > 0 && !idSet[site.ID] {
-			continue
-		}
-		targets = append(targets, site)
-	}
-	return targets
-}
-
-func (a *App) schedulerLoop(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			a.runScheduledCrawlIfDue()
-		}
-	}
-}
-
-func (a *App) runScheduledCrawlIfDue() {
-	now := time.Now()
-
-	a.mu.Lock()
-	a.normalizeScheduleLocked()
-	schedule := a.state.Schedule
-	if !schedule.Enabled || schedule.NextRunAt == "" {
-		a.mu.Unlock()
-		return
-	}
-	scheduledFor, err := time.Parse(time.RFC3339, schedule.NextRunAt)
-	if err != nil {
-		a.state.Schedule.NextRunAt = now.Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
-		_ = a.saveLocked()
-		a.mu.Unlock()
-		return
-	}
-	if now.Before(scheduledFor) {
-		a.mu.Unlock()
-		return
-	}
-	a.mu.Unlock()
-
-	if !a.crawlMu.TryLock() {
-		return
-	}
-	defer a.crawlMu.Unlock()
-
-	days := 7
-	if schedule.Mode == "daily" {
-		days = 1
-	}
-	_, _ = a.runCrawl(CrawlRequest{Days: days})
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.normalizeScheduleLocked()
-	if a.state.Schedule.Enabled {
-		a.state.Schedule.LastRunAt = nowString()
-		a.state.Schedule.NextRunAt = nextRunAt(time.Now(), a.state.Schedule)
-		_ = a.saveLocked()
-	}
-}
-
-func (a *App) normalizeScheduleLocked() {
-	if a.state.Schedule.Mode == "" {
-		a.state.Schedule.Mode = "interval"
-	}
-	if a.state.Schedule.Mode != "daily" {
-		a.state.Schedule.Mode = "interval"
-	}
-	if !validDailyTime(a.state.Schedule.DailyTime) {
-		a.state.Schedule.DailyTime = "09:00"
-	}
-	if a.state.Schedule.IntervalMinutes <= 0 {
-		a.state.Schedule.IntervalMinutes = 60
-	}
-	if a.state.Schedule.IntervalMinutes < 5 {
-		a.state.Schedule.IntervalMinutes = 5
-	}
-	if a.state.Schedule.IntervalMinutes > 1440 {
-		a.state.Schedule.IntervalMinutes = 1440
-	}
-	if !a.state.Schedule.Enabled {
-		a.state.Schedule.NextRunAt = ""
-	}
-}
-
 func (a *App) normalizeArchiveLocked() {
 	if strings.TrimSpace(a.state.Archive.RootPath) == "" {
 		a.state.Archive = defaultArchiveConfig()
@@ -973,23 +773,6 @@ func normalizeCategories(categories []NoticeCategory) []NoticeCategory {
 		cleaned = append(cleaned, category)
 	}
 	return cleaned
-}
-
-func validDailyTime(value string) bool {
-	_, err := time.Parse("15:04", value)
-	return err == nil
-}
-
-func nextRunAt(now time.Time, schedule ScheduleConfig) string {
-	if schedule.Mode != "daily" {
-		return now.Add(time.Duration(schedule.IntervalMinutes) * time.Minute).Format(time.RFC3339)
-	}
-	dailyTime, _ := time.Parse("15:04", schedule.DailyTime)
-	next := time.Date(now.Year(), now.Month(), now.Day(), dailyTime.Hour(), dailyTime.Minute(), 0, 0, now.Location())
-	if !next.After(now) {
-		next = next.AddDate(0, 0, 1)
-	}
-	return next.Format(time.RFC3339)
 }
 
 func (a *App) crawlSite(site SiteConfig, req CrawlRequest) (task CrawlTask) {
@@ -1277,7 +1060,7 @@ func (a *App) fetchSGCCCategory(site SiteConfig, category NoticeCategory, req Cr
 			Index:           page,
 			Size:            pageSize,
 			FirstPageMenuID: category.MenuID,
-			Key:             strings.TrimSpace(req.Keyword),
+			Key:             "",
 		}
 		var data sgccNoteListResponse
 		if err := a.postJSON(sgccNoticeListURL, payload, &data); err != nil {
@@ -1689,19 +1472,8 @@ func inferNoticeType(text string) string {
 	}
 }
 
-func matchKeywords(text string, site SiteConfig, req CrawlRequest) []string {
-	candidates := append([]string{}, site.Keywords...)
-	if strings.TrimSpace(req.Keyword) != "" {
-		candidates = append(candidates, req.Keyword)
-	}
-
-	var matched []string
-	for _, keyword := range cleanList(candidates) {
-		if strings.Contains(strings.ToLower(text), strings.ToLower(keyword)) {
-			matched = append(matched, keyword)
-		}
-	}
-	return matched
+func matchKeywords(_ string, _ SiteConfig, _ CrawlRequest) []string {
+	return []string{}
 }
 
 func (a *App) upsertOpportunities(items []Opportunity) (int, int) {

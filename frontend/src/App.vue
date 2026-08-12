@@ -2,26 +2,22 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
   ClearHistory,
-  Dashboard,
   DeleteSite,
   GetArchiveConfig,
-  GetSchedule,
   ListOpportunities,
   ListSites,
   ListTasks,
   OpenArchiveDirectory,
   RetryArchive,
-  RunCrawl,
   RunSGCCAutoPages1To7,
   SaveArchiveConfig,
-  SaveSchedule,
   SaveSite,
   SelectArchiveDirectory
 } from '../wailsjs/go/main/App'
 import { main } from '../wailsjs/go/models'
 import { BrowserOpenURL, EventsOn } from '../wailsjs/runtime/runtime'
 
-type Tab = 'automatic' | 'opportunities' | 'sites' | 'schedule' | 'tasks'
+type Tab = 'automatic' | 'opportunities' | 'sites' | 'tasks'
 type AutomationProgress = {
   current: number
   total: number
@@ -62,31 +58,13 @@ function createAutoSteps(): AutoStep[] {
   }))
 }
 
-const activeTab = ref<Tab>('opportunities')
+const activeTab = ref<Tab>('automatic')
 const loading = ref(false)
 const message = ref('')
-const crawlElapsedSeconds = ref(0)
-let crawlElapsedTimer: ReturnType<typeof setInterval> | null = null
-const crawlTimeoutMs = 60_000
-const dashboard = ref<main.Dashboard>({
-  siteCount: 0,
-  enabledSiteCount: 0,
-  opportunityCount: 0,
-  lastTaskCount: 0
-})
 const sites = ref<main.SiteConfig[]>([])
 const tasks = ref<main.CrawlTask[]>([])
 const opportunities = ref<main.Opportunity[]>([])
 const selectedOpportunity = ref<main.Opportunity | null>(null)
-const savingSchedule = ref(false)
-const schedule = ref<main.ScheduleConfig>({
-  enabled: false,
-  mode: 'interval',
-  intervalMinutes: 60,
-  dailyTime: '09:00',
-  lastRunAt: '',
-  nextRunAt: ''
-})
 const archive = ref<main.ArchiveConfig>({ rootPath: '' })
 const autoRunning = ref(false)
 const autoSteps = ref<AutoStep[]>(createAutoSteps())
@@ -103,8 +81,6 @@ const siteForm = reactive(new main.SiteConfig({
   baseUrl: '',
   enabled: true,
   renderMode: 'http',
-  keywords: [],
-  regions: [],
   dateRangeDays: 7,
   minIntervalMs: 1500,
   maxRetries: 3,
@@ -114,16 +90,10 @@ const siteForm = reactive(new main.SiteConfig({
   updatedAt: ''
 }))
 
-const keywordInput = ref('')
-const regionInput = ref('')
+const siteEditorOpen = ref(false)
 
 const visibleOpportunities = computed(() => opportunities.value)
 const autoOverallPercent = computed(() => Math.round(autoSteps.value.reduce((total, step) => total + step.percent, 0) / autoSteps.value.length))
-const scheduleStatus = computed(() => {
-  if (!schedule.value.enabled) return '定时抓取未开启'
-  const next = formatDateTime(schedule.value.nextRunAt)
-  return next ? `下次 ${next}` : '等待下次抓取'
-})
 
 function resetSiteForm() {
   Object.assign(siteForm, {
@@ -133,8 +103,6 @@ function resetSiteForm() {
     baseUrl: '',
     enabled: true,
     renderMode: 'http',
-    keywords: [],
-    regions: [],
     dateRangeDays: 7,
     minIntervalMs: 1500,
     maxRetries: 3,
@@ -143,38 +111,30 @@ function resetSiteForm() {
     createdAt: '',
     updatedAt: ''
   })
-  keywordInput.value = ''
-  regionInput.value = ''
+  siteEditorOpen.value = false
 }
 
 function editSite(site: main.SiteConfig) {
   Object.assign(siteForm, JSON.parse(JSON.stringify(site)))
-  keywordInput.value = site.keywords?.join('，') || ''
-  regionInput.value = site.regions?.join('，') || ''
+  siteEditorOpen.value = true
   activeTab.value = 'sites'
 }
 
-function splitList(value: string) {
-  return value
-    .split(/[,，\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
+function addSite() {
+  resetSiteForm()
+  siteEditorOpen.value = true
 }
 
 async function refreshAll() {
   loading.value = true
   try {
-    const [dash, siteList, taskList, scheduleConfig, archiveConfig] = await Promise.all([
-      Dashboard(),
+    const [siteList, taskList, archiveConfig] = await Promise.all([
       ListSites(),
       ListTasks(),
-      GetSchedule(),
       GetArchiveConfig()
     ])
-    dashboard.value = dash
     sites.value = siteList || []
     tasks.value = taskList || []
-    schedule.value = scheduleConfig
     archive.value = archiveConfig
     await refreshOpportunities()
   } finally {
@@ -220,62 +180,6 @@ function summarizeCrawlTasks(result: main.CrawlTask[]) {
   return `抓取完成：新增 ${newCount} 条，重复/更新 ${duplicateCount} 条`
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMessage: string) {
-  let timer: ReturnType<typeof setTimeout> | null = null
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(timeoutMessage)), ms)
-  })
-  return Promise.race([
-    promise.finally(() => {
-      if (timer) clearTimeout(timer)
-    }),
-    timeout
-  ])
-}
-
-function startCrawlTimer() {
-  crawlElapsedSeconds.value = 0
-  if (crawlElapsedTimer) clearInterval(crawlElapsedTimer)
-  crawlElapsedTimer = setInterval(() => {
-    crawlElapsedSeconds.value += 1
-    message.value = `正在抓取，请稍候...已耗时 ${crawlElapsedSeconds.value} 秒`
-  }, 1000)
-}
-
-function stopCrawlTimer() {
-  if (crawlElapsedTimer) {
-    clearInterval(crawlElapsedTimer)
-    crawlElapsedTimer = null
-  }
-}
-
-function formatDateTime(value: string) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
-}
-
-async function saveSchedule() {
-  savingSchedule.value = true
-  try {
-    schedule.value = await SaveSchedule({
-      enabled: schedule.value.enabled,
-      mode: schedule.value.mode,
-      intervalMinutes: Number(schedule.value.intervalMinutes) || 60,
-      dailyTime: schedule.value.dailyTime,
-      lastRunAt: schedule.value.lastRunAt,
-      nextRunAt: schedule.value.nextRunAt
-    })
-    message.value = schedule.value.enabled
-      ? `定时抓取已开启：每 ${schedule.value.intervalMinutes} 分钟一次`
-      : '定时抓取已关闭'
-  } catch (error) {
-    message.value = error instanceof Error ? error.message : String(error)
-  } finally {
-    savingSchedule.value = false
-  }
-}
 
 async function chooseArchiveDirectory() {
   const selected = await SelectArchiveDirectory()
@@ -380,8 +284,6 @@ async function saveSite() {
   loading.value = true
   message.value = ''
   try {
-    siteForm.keywords = splitList(keywordInput.value)
-    siteForm.regions = splitList(regionInput.value)
     await SaveSite(siteForm)
     message.value = '站点配置已保存'
     resetSiteForm()
@@ -403,30 +305,6 @@ async function removeSite(id: string) {
   } catch (error) {
     message.value = String(error)
   } finally {
-    loading.value = false
-  }
-}
-
-async function runCrawl() {
-  loading.value = true
-  message.value = '正在抓取，请稍候...'
-  startCrawlTimer()
-  try {
-    const result = await withTimeout(
-      RunCrawl({
-        siteIds: sites.value.filter((site) => site.enabled).map((site) => site.id),
-        keyword: '',
-        days: 7
-      }),
-      crawlTimeoutMs,
-      '抓取超过 60 秒仍未返回，请到任务日志查看是否有长时间运行或失败的站点。'
-    )
-    message.value = summarizeCrawlTasks(result)
-    await refreshAll()
-  } catch (error) {
-    message.value = error instanceof Error ? error.message : String(error)
-  } finally {
-    stopCrawlTimer()
     loading.value = false
   }
 }
@@ -455,23 +333,11 @@ onBeforeUnmount(removeAutoProgressListener)
       </div>
 
       <nav>
-        <button :class="{ active: activeTab === 'automatic' }" @click="startAutomaticMode">全自动模式</button>
+        <button :class="{ active: activeTab === 'automatic' }" @click="activeTab = 'automatic'">全自动模式</button>
         <button :class="{ active: activeTab === 'opportunities' }" @click="activeTab = 'opportunities'">公告库</button>
         <button :class="{ active: activeTab === 'sites' }" @click="activeTab = 'sites'">站点配置</button>
-        <button :class="{ active: activeTab === 'schedule' }" @click="activeTab = 'schedule'">定时抓取</button>
         <button :class="{ active: activeTab === 'tasks' }" @click="activeTab = 'tasks'">任务日志</button>
       </nav>
-
-      <section class="stats">
-        <div>
-          <strong>{{ dashboard.opportunityCount }}</strong>
-          <span>公告记录</span>
-        </div>
-        <div>
-          <strong>{{ dashboard.enabledSiteCount }}/{{ dashboard.siteCount }}</strong>
-          <span>启用站点</span>
-        </div>
-      </section>
     </aside>
 
     <section class="content">
@@ -480,14 +346,8 @@ onBeforeUnmount(removeAutoProgressListener)
           <h2 v-if="activeTab === 'opportunities'">公告库</h2>
           <h2 v-else-if="activeTab === 'automatic'">全自动模式</h2>
           <h2 v-else-if="activeTab === 'sites'">站点配置</h2>
-          <h2 v-else-if="activeTab === 'schedule'">定时抓取</h2>
           <h2 v-else>任务日志</h2>
-          <p>{{ message || '配置目标站点，手动抓取并归档招标采购商机。' }}</p>
-        </div>
-        <div class="topbar-actions">
-          <button class="primary" :disabled="loading" @click="runCrawl">
-            {{ loading ? '处理中...' : '开始抓取' }}
-          </button>
+          <p>{{ message || '通过全自动模式执行国家电网公告归档。' }}</p>
         </div>
       </header>
 
@@ -529,7 +389,7 @@ onBeforeUnmount(removeAutoProgressListener)
             </li>
           </ol>
           <button class="primary" :disabled="autoRunning" @click="startAutomaticMode">
-            {{ autoRunning ? '正在执行...' : '重新执行' }}
+            {{ autoRunning ? '正在执行...' : '执行' }}
           </button>
         </div>
       </section>
@@ -560,7 +420,7 @@ onBeforeUnmount(removeAutoProgressListener)
                 <span v-for="keyword in item.matchedKeywords" :key="keyword">{{ keyword }}</span>
               </div>
             </article>
-            <div v-if="!visibleOpportunities.length" class="empty">暂无公告。先确认站点配置，然后点击开始抓取。</div>
+            <div v-if="!visibleOpportunities.length" class="empty">暂无公告。请在全自动模式中执行抓取。</div>
           </div>
         </div>
 
@@ -602,9 +462,29 @@ onBeforeUnmount(removeAutoProgressListener)
         </aside>
       </section>
 
-      <section v-else-if="activeTab === 'sites'" class="workspace two-column">
-        <form class="panel form" @submit.prevent="saveSite">
-          <h3>{{ siteForm.id ? '编辑站点' : '新增站点' }}</h3>
+      <section v-else-if="activeTab === 'sites'" class="workspace site-workspace">
+        <div class="panel site-list-panel">
+          <div class="section-head">
+            <h3>已配置站点</h3>
+            <button class="primary" @click="addSite">添加站点</button>
+          </div>
+          <article v-for="site in sites" :key="site.id" class="site-row clickable" @click="editSite(site)">
+            <div>
+              <h4>{{ site.name }}</h4>
+              <p>{{ site.baseUrl }}</p>
+              <span>{{ site.siteType }} · {{ site.renderMode }} · {{ site.enabled ? '启用' : '停用' }}</span>
+              <p v-if="site.siteType === 'sgcc'">已启用栏目：{{ site.categories?.filter((item) => item.enabled).length || 0 }}</p>
+            </div>
+            <button class="danger" @click.stop="removeSite(site.id)">删除</button>
+          </article>
+          <div v-if="!sites.length" class="empty">暂无站点。添加站点后可进行配置。</div>
+        </div>
+
+        <form v-if="siteEditorOpen" class="panel form" @submit.prevent="saveSite">
+          <div class="section-head">
+            <h3>{{ siteForm.id ? '编辑站点' : '添加站点' }}</h3>
+            <button type="button" @click="resetSiteForm">关闭</button>
+          </div>
           <label>
             站点名称
             <input v-model="siteForm.name" required placeholder="国家电网 - 招标采购公告" />
@@ -644,29 +524,28 @@ onBeforeUnmount(removeAutoProgressListener)
               <input v-model.number="siteForm.maxRetries" min="1" type="number" />
             </label>
           </div>
-          <label>
-            关键词
-            <textarea v-model="keywordInput" rows="3" placeholder="招标，采购，变电站"></textarea>
-          </label>
-          <label>
-            地区
-            <textarea v-model="regionInput" rows="2" placeholder="广东，江苏，上海"></textarea>
-          </label>
           <label class="check">
             <input v-model="siteForm.enabled" type="checkbox" />
             启用站点
           </label>
           <div class="actions">
             <button class="primary" type="submit">保存站点</button>
-            <button type="button" @click="resetSiteForm">清空</button>
+            <button type="button" @click="resetSiteForm">取消</button>
           </div>
+          <section v-if="siteForm.siteType === 'sgcc'" class="category-settings">
+            <h3>国家电网公告栏目</h3>
+            <label v-for="category in siteForm.categories" :key="category.id" class="check">
+              <input v-model="category.enabled" type="checkbox" />
+              {{ category.name }}
+            </label>
+          </section>
         </form>
 
         <div class="panel form">
           <form class="form" @submit.prevent="saveArchiveConfig">
             <h3>公告归档目录</h3>
             <label>
-              下载与快照保存位置
+              下载保存位置
               <input v-model="archive.rootPath" required placeholder="D:\\商机提取器归档" />
             </label>
             <div class="actions">
@@ -675,71 +554,6 @@ onBeforeUnmount(removeAutoProgressListener)
             </div>
           </form>
 
-          <h3>已配置站点</h3>
-          <article v-for="site in sites" :key="site.id" class="site-row">
-            <div>
-              <h4>{{ site.name }}</h4>
-              <p>{{ site.baseUrl }}</p>
-              <span>{{ site.siteType }} · {{ site.renderMode }} · {{ site.enabled ? '启用' : '停用' }}</span>
-              <p v-if="site.siteType === 'sgcc'">已启用栏目：{{ site.categories?.filter((item) => item.enabled).length || 0 }}</p>
-            </div>
-            <div class="row-actions">
-              <button @click="editSite(site)">编辑</button>
-              <button @click="removeSite(site.id)">删除</button>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section v-if="activeTab === 'sites' && siteForm.siteType === 'sgcc'" class="workspace">
-        <div class="panel form">
-          <h3>国家电网公告栏目</h3>
-          <label v-for="category in siteForm.categories" :key="category.id" class="check">
-            <input v-model="category.enabled" type="checkbox" />
-            {{ category.name }}
-          </label>
-        </div>
-      </section>
-
-      <section v-else-if="activeTab === 'schedule'" class="workspace">
-        <div class="panel schedule-page">
-          <div class="schedule-row">
-            <label class="check">
-              <input v-model="schedule.enabled" type="checkbox" :disabled="savingSchedule" @change="saveSchedule" />
-              启用定时抓取
-            </label>
-            <label>
-              执行方式
-              <select v-model="schedule.mode" :disabled="savingSchedule || !schedule.enabled" @change="saveSchedule">
-                <option value="interval">固定间隔</option>
-                <option value="daily">每日固定时间</option>
-              </select>
-            </label>
-            <label>
-              间隔分钟
-              <input
-                v-model.number="schedule.intervalMinutes"
-                min="5"
-                max="1440"
-                step="5"
-                type="number"
-                :disabled="savingSchedule || !schedule.enabled || schedule.mode === 'daily'"
-                @change="saveSchedule"
-              />
-            </label>
-            <label v-if="schedule.mode === 'daily'">
-              每日执行时间
-              <input v-model="schedule.dailyTime" type="time" :disabled="savingSchedule || !schedule.enabled" @change="saveSchedule" />
-            </label>
-          </div>
-          <dl>
-            <dt>状态</dt>
-            <dd>{{ scheduleStatus }}</dd>
-            <dt>上次运行</dt>
-            <dd>{{ formatDateTime(schedule.lastRunAt) || '暂无' }}</dd>
-            <dt>抓取范围</dt>
-            <dd>所有启用站点，最近 7 天</dd>
-          </dl>
         </div>
       </section>
 

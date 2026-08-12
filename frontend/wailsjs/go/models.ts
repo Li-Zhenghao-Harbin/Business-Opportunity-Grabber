@@ -36,22 +36,6 @@ export namespace main {
 	        this.errorReason = source["errorReason"];
 	    }
 	}
-	export class CrawlRequest {
-	    siteIds: string[];
-	    keyword: string;
-	    days: number;
-
-	    static createFrom(source: any = {}) {
-	        return new CrawlRequest(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.siteIds = source["siteIds"];
-	        this.keyword = source["keyword"];
-	        this.days = source["days"];
-	    }
-	}
 	export class CrawlTask {
 	    id: string;
 	    siteId: string;
@@ -256,28 +240,6 @@ export namespace main {
 	        this.siteId = source["siteId"];
 	    }
 	}
-	export class ScheduleConfig {
-	    enabled: boolean;
-	    mode: string;
-	    intervalMinutes: number;
-	    dailyTime: string;
-	    lastRunAt: string;
-	    nextRunAt: string;
-
-	    static createFrom(source: any = {}) {
-	        return new ScheduleConfig(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.mode = source["mode"];
-	        this.intervalMinutes = source["intervalMinutes"];
-	        this.dailyTime = source["dailyTime"];
-	        this.lastRunAt = source["lastRunAt"];
-	        this.nextRunAt = source["nextRunAt"];
-	    }
-	}
 	export class SiteConfig {
 	    id: string;
 	    name: string;
@@ -285,8 +247,6 @@ export namespace main {
 	    baseUrl: string;
 	    enabled: boolean;
 	    renderMode: string;
-	    keywords: string[];
-	    regions: string[];
 	    dateRangeDays: number;
 	    minIntervalMs: number;
 	    maxRetries: number;
@@ -307,8 +267,6 @@ export namespace main {
 	        this.baseUrl = source["baseUrl"];
 	        this.enabled = source["enabled"];
 	        this.renderMode = source["renderMode"];
-	        this.keywords = source["keywords"];
-	        this.regions = source["regions"];
 	        this.dateRangeDays = source["dateRangeDays"];
 	        this.minIntervalMs = source["minIntervalMs"];
 	        this.maxRetries = source["maxRetries"];

@@ -114,18 +114,6 @@ func TestArchiveNeedsRefreshWhenDetailWasNeverFetched(t *testing.T) {
 	}
 }
 
-func TestNextRunAtDaily(t *testing.T) {
-	now := time.Date(2026, time.August, 11, 10, 30, 0, 0, time.Local)
-	value := nextRunAt(now, ScheduleConfig{Mode: "daily", DailyTime: "09:00"})
-	next, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next.Day() != 12 || next.Hour() != 9 || next.Minute() != 0 {
-		t.Fatalf("unexpected next daily run: %s", value)
-	}
-}
-
 func TestArchiveOpportunityWritesSnapshotAndAttachment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {

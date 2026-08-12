@@ -10,8 +10,6 @@ export function DeleteSite(arg1:string):Promise<void>;
 
 export function GetArchiveConfig():Promise<main.ArchiveConfig>;
 
-export function GetSchedule():Promise<main.ScheduleConfig>;
-
 export function ListOpportunities(arg1:main.OpportunityQuery):Promise<Array<main.Opportunity>>;
 
 export function ListSites():Promise<Array<main.SiteConfig>>;
@@ -22,13 +20,9 @@ export function OpenArchiveDirectory():Promise<void>;
 
 export function RetryArchive(arg1:string):Promise<main.Opportunity>;
 
-export function RunCrawl(arg1:main.CrawlRequest):Promise<Array<main.CrawlTask>>;
-
 export function RunSGCCAutoPages1To7():Promise<Array<main.CrawlTask>>;
 
 export function SaveArchiveConfig(arg1:main.ArchiveConfig):Promise<main.ArchiveConfig>;
-
-export function SaveSchedule(arg1:main.ScheduleConfig):Promise<main.ScheduleConfig>;
 
 export function SaveSite(arg1:main.SiteConfig):Promise<main.SiteConfig>;
 

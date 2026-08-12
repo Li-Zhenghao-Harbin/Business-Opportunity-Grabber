@@ -18,10 +18,6 @@ export function GetArchiveConfig() {
   return window['go']['main']['App']['GetArchiveConfig']();
 }
 
-export function GetSchedule() {
-  return window['go']['main']['App']['GetSchedule']();
-}
-
 export function ListOpportunities(arg1) {
   return window['go']['main']['App']['ListOpportunities'](arg1);
 }
@@ -42,20 +38,12 @@ export function RetryArchive(arg1) {
   return window['go']['main']['App']['RetryArchive'](arg1);
 }
 
-export function RunCrawl(arg1) {
-  return window['go']['main']['App']['RunCrawl'](arg1);
-}
-
 export function RunSGCCAutoPages1To7() {
   return window['go']['main']['App']['RunSGCCAutoPages1To7']();
 }
 
 export function SaveArchiveConfig(arg1) {
   return window['go']['main']['App']['SaveArchiveConfig'](arg1);
-}
-
-export function SaveSchedule(arg1) {
-  return window['go']['main']['App']['SaveSchedule'](arg1);
 }
 
 export function SaveSite(arg1) {

@@ -113,30 +113,6 @@ nav button.active {
   color: #12343b;
 }
 
-.stats {
-  display: grid;
-  gap: 10px;
-  margin-top: auto;
-}
-
-.stats div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 14px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.stats strong {
-  font-size: 22px;
-}
-
-.stats span {
-  color: #c9d7d9;
-  font-size: 13px;
-}
-
 .content {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -179,18 +155,6 @@ nav button.active {
 .danger {
   border-color: #b45309;
   color: #9a3412;
-}
-
-.topbar-actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.schedule-page {
-  display: grid;
-  align-content: start;
-  gap: 16px;
 }
 
 .automation-panel {
@@ -296,17 +260,6 @@ progress {
 
 .automation-substep small {
   color: #64748b;
-}
-
-.schedule-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 14px;
-  align-items: end;
-}
-
-.schedule-row input[type="number"] {
-  max-width: 180px;
 }
 
 .workspace {
@@ -475,6 +428,40 @@ dd {
   gap: 12px;
   padding: 14px 0;
   border-bottom: 1px solid #e2e8f0;
+}
+
+.site-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(420px, 1.2fr) minmax(300px, 0.7fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.site-list-panel {
+  display: grid;
+  gap: 4px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.site-row.clickable {
+  cursor: pointer;
+}
+
+.site-row.clickable:hover {
+  background: #f4fbfa;
+}
+
+.category-settings {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
 }
 
 .site-row span {
