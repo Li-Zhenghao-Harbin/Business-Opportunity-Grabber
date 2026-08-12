@@ -61,11 +61,27 @@ func TestDefaultSitesIncludesCSG(t *testing.T) {
 
 func TestDefaultSGCCSiteIncludesP0Categories(t *testing.T) {
 	site := defaultSGCCSite()
-	if len(site.Categories) != 3 {
-		t.Fatalf("expected 3 SGCC auto categories, got %d", len(site.Categories))
+	if len(site.Categories) != 4 {
+		t.Fatalf("expected 4 SGCC auto categories, got %d", len(site.Categories))
 	}
-	if site.Categories[0].PagePath == "" || site.Categories[1].PagePath == "" || site.Categories[2].PagePath == "" {
+	if site.Categories[0].PagePath == "" || site.Categories[1].PagePath == "" || site.Categories[2].PagePath == "" || site.Categories[3].PagePath == "" {
 		t.Fatal("expected each SGCC auto category to include its PDF page path")
+	}
+}
+
+func TestMergeBidPackageRows(t *testing.T) {
+	rows := mergeBidPackageRows([]bidPackageRow{
+		{SectionName: "变压器", SectionNo: "SB-01", PackageNo: "1", Amount: 120, Quantity: 2},
+		{SectionName: "变压器", SectionNo: "SB-01", PackageNo: "1", Amount: 30, Quantity: 1},
+		{SectionName: "开关", SectionNo: "SB-02", PackageNo: "2", Amount: 80, Quantity: 4},
+	})
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 merged package rows, got %d", len(rows))
+	}
+	for _, row := range rows {
+		if row.SectionNo == "SB-01" && (row.Amount != 150 || row.Quantity != 3) {
+			t.Fatalf("expected duplicate package values to merge, got %#v", row)
+		}
 	}
 }
 

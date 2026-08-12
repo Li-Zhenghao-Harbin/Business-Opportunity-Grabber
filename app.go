@@ -355,6 +355,7 @@ func defaultSGCCCategories() []NoticeCategory {
 		{ID: "sgcc-single-source", Name: "1.1 单一来源采购事前公示", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-com/2021071678253350_1_2019102186483919", MenuID: "2019102186483919", NoticeType: "单一来源公示", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
 		{ID: "sgcc-annual-plan", Name: "1.2 年度采购计划预安排", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-com/2021071678253350_1_2020052000175277", MenuID: "2020052000175277", NoticeType: "年度采购计划", Enabled: true, DownloadAttachments: false, ArchiveProject: true},
 		{ID: "sgcc-prequalification", Name: "2.1 资格预审公告", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe/2018032600289606_1_2018032700290425", MenuID: "2018032700290425", NoticeType: "资格预审", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
+		{ID: "sgcc-bid", Name: "2.2 招标公告及投标邀请书", PagePath: "https://ecp.sgcc.com.cn/ecp2.0/portal/#/list/list-spe/2018032600289606_1_2018032700291334", MenuID: "2018032700291334", NoticeType: "招标公告", Enabled: true, DownloadAttachments: true, ArchiveProject: true},
 	}
 }
 
@@ -540,7 +541,7 @@ func (a *App) RunSGCCAutoPages1To7() ([]CrawlTask, error) {
 		return nil, errors.New("未找到已启用的国家电网站点")
 	}
 
-	categoryIDs := []string{"sgcc-single-source", "sgcc-annual-plan", "sgcc-prequalification"}
+	categoryIDs := []string{"sgcc-single-source", "sgcc-annual-plan", "sgcc-prequalification", "sgcc-bid"}
 	categoryByID := map[string]NoticeCategory{}
 	for _, category := range site.Categories {
 		categoryByID[category.ID] = category

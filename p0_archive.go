@@ -101,6 +101,21 @@ func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeC
 			return
 		}
 	}
+	if category.ID == "sgcc-bid" {
+		if report != nil {
+			report("生成招标及结果 Excel", false, "正在解压公告文件并汇总标包需求")
+		}
+		if err := writeBidResultWorkbook(archivePath, *item, body, attachments); err != nil {
+			item.ProcessStatus = "部分归档失败"
+			item.ArchiveError = fmt.Sprintf("无法生成招标及结果 Excel：%v", err)
+			return
+		}
+		if report != nil {
+			report("生成招标及结果 Excel", true, "招标及结果 Excel 已生成")
+		}
+	} else if report != nil {
+		report("生成招标及结果 Excel", true, "该栏目无需生成招标及结果 Excel")
+	}
 	item.ProcessStatus = "已归档"
 	item.ArchiveError = ""
 }
@@ -113,6 +128,8 @@ func (a *App) fetchArchiveDetail(item Opportunity, category NoticeCategory) (sgc
 		case "sgcc-annual-plan":
 			return a.fetchSGCCAnnualPlanDetail(item)
 		case "sgcc-prequalification":
+			return a.fetchSGCCBidDetail(item)
+		case "sgcc-bid":
 			return a.fetchSGCCBidDetail(item)
 		}
 	}

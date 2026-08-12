@@ -42,13 +42,14 @@ type AutoStep = {
   substeps: AutoSubstep[]
 }
 
-const autoSubstepNames = ['抓取数据', '创建文件夹', '创建 Word 文档', '下载附件', '更新状态']
+const autoSubstepNames = ['抓取数据', '创建文件夹', '创建 Word 文档', '下载附件', '生成招标及结果 Excel', '更新状态']
 
 function createAutoSteps(): AutoStep[] {
   return [
     '1.1 单一来源采购事前公示',
     '1.2 年度采购计划预安排',
-    '2.1 资格预审公告'
+    '2.1 资格预审公告',
+    '2.2 招标公告及投标邀请书'
   ].map((title) => ({
     title,
     status: 'pending',
@@ -225,12 +226,15 @@ function updateAutoProgress(progress: AutomationProgress) {
   step.status = progress.status
   step.message = progress.message
   step.percent = progress.percent
-  if (progress.substep === '更新状态' && ['no_updates', 'failed', 'skipped'].includes(progress.status)) {
+  const terminalNoWork = progress.status === 'no_updates' ||
+    progress.status === 'skipped' ||
+    (progress.status === 'success' && progress.message.includes('网站无更新'))
+  if (progress.substep === '更新状态' && (terminalNoWork || progress.status === 'failed')) {
     step.substeps.forEach((item) => {
       if (item.status === 'pending') {
-        item.status = progress.status
+        item.status = progress.status === 'success' ? 'success' : progress.status
         item.percent = 100
-        item.message = progress.status === 'no_updates' ? '无新增公告，无需执行' : '本步骤未执行'
+        item.message = terminalNoWork ? '无新增公告，无需执行' : '本步骤未执行'
       }
     })
   }
