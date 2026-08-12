@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -73,6 +75,19 @@ func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeC
 		report("创建 Word 文档", true, "公告 Word 文档已保存")
 	}
 	if !detailAvailable {
+		if category.ID == "sgcc-bid" {
+			if report != nil {
+				report("生成招标及结果 Excel", false, "详情暂不可用，正在生成待复核招标及结果 Excel")
+			}
+			if writeErr := writeBidResultWorkbook(archivePath, *item, body, nil); writeErr != nil {
+				item.ProcessStatus = "归档失败"
+				item.ArchiveError = fmt.Sprintf("详情不可用且无法生成招标及结果 Excel：%v", writeErr)
+				return
+			}
+			if report != nil {
+				report("生成招标及结果 Excel", true, "已生成待复核招标及结果 Excel")
+			}
+		}
 		item.ProcessStatus = "待归档"
 		if err != nil {
 			item.ArchiveError = fmt.Sprintf("详情页未归档：%v", err)
@@ -261,30 +276,42 @@ func (a *App) fetchSGCCBidDetail(item Opportunity) (sgccArchiveDetail, error) {
 		return sgccArchiveDetail{}, fmt.Errorf("资格预审公告缺少详情标识")
 	}
 	var response struct {
-		Successful  bool   `json:"successful"`
-		ResultHint  string `json:"resultHint"`
-		ResultValue struct {
-			Notice   map[string]any `json:"notice"`
-			FileFlag any            `json:"fileFlag"`
-		} `json:"resultValue"`
+		Successful  bool            `json:"successful"`
+		ResultHint  string          `json:"resultHint"`
+		ResultValue json.RawMessage `json:"resultValue"`
 	}
 	if err := a.postJSON(sgccCoreURL+"index/getNoticeBid", id, &response); err != nil {
 		return sgccArchiveDetail{}, err
 	}
-	if !response.Successful || len(response.ResultValue.Notice) == 0 {
+	var result struct {
+		Notice   map[string]any `json:"notice"`
+		FileFlag any            `json:"fileFlag"`
+	}
+	resultValue := bytes.TrimSpace(response.ResultValue)
+	if len(resultValue) > 0 && resultValue[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(resultValue, &encoded); err != nil {
+			return sgccArchiveDetail{}, fmt.Errorf("招标公告详情数据解析失败：%w", err)
+		}
+		resultValue = []byte(encoded)
+	}
+	if err := json.Unmarshal(resultValue, &result); err != nil {
+		return sgccArchiveDetail{}, fmt.Errorf("招标公告详情数据解析失败：%w", err)
+	}
+	if !response.Successful || len(result.Notice) == 0 {
 		return sgccArchiveDetail{}, fmt.Errorf("资格预审详情接口未返回正文：%s", response.ResultHint)
 	}
-	lines := flattenRecord("资格预审公告", response.ResultValue.Notice)
+	lines := flattenRecord("招标公告", result.Notice)
 	body := strings.Join(lines, "\n")
-	if content, ok := mapString(response.ResultValue.Notice, "CONT", "CONTENT", "NOTICE_CONTENT"); ok {
+	if content, ok := mapString(result.Notice, "CONT", "CONTENT", "NOTICE_CONTENT"); ok {
 		body = documentTextFromHTML(content)
 		if body == "" {
 			body = strings.Join(lines, "\n")
 		}
 	}
 	attachments := []sgccAttachmentSource{}
-	if sgccFileAvailable(response.ResultValue.FileFlag) {
-		detailID, _ := mapString(response.ResultValue.Notice, "NOTICE_DET_ID", "NOTICE_DETAIL_ID", "ID")
+	if sgccFileAvailable(result.FileFlag) {
+		detailID, _ := mapString(result.Notice, "NOTICE_DET_ID", "NOTICE_DETAIL_ID", "ID")
 		attachmentURL := sgccCoreURL + "index/downLoadBid?noticeId=" + url.QueryEscape(id)
 		if detailID != "" {
 			attachmentURL += "&noticeDetId=" + url.QueryEscape(detailID)
@@ -360,7 +387,7 @@ func (a *App) restoreMissingArchives(site SiteConfig, category NoticeCategory, d
 	a.mu.Lock()
 	candidates := make([]Opportunity, 0)
 	for _, item := range a.state.Opportunities {
-		if item.SiteID != site.ID || item.CategoryID != category.ID || !isWithinArchiveWindow(item, cutoffDate) || !archiveNeedsRefresh(item) {
+		if item.SiteID != site.ID || item.CategoryID != category.ID || !isWithinArchiveWindow(item, cutoffDate) || !archiveNeedsRefresh(item, category) {
 			continue
 		}
 		candidates = append(candidates, item)
@@ -388,7 +415,7 @@ func isWithinArchiveWindow(item Opportunity, cutoffDate string) bool {
 	return isOnOrAfterCutoffDate(value, cutoffDate)
 }
 
-func archiveIsMissing(item Opportunity) bool {
+func archiveIsMissing(item Opportunity, category NoticeCategory) bool {
 	if item.ArchivePath == "" {
 		return true
 	}
@@ -397,11 +424,18 @@ func archiveIsMissing(item Opportunity) bool {
 		return true
 	}
 	_, err = os.Stat(noticeDocxPath(item.ArchivePath, item))
-	return err != nil
+	if err != nil {
+		return true
+	}
+	if category.ID == "sgcc-bid" {
+		_, err = os.Stat(filepath.Join(item.ArchivePath, "招标及结果.xlsx"))
+		return err != nil
+	}
+	return false
 }
 
-func archiveNeedsRefresh(item Opportunity) bool {
-	return item.DetailFetchedAt == "" || archiveIsMissing(item)
+func archiveNeedsRefresh(item Opportunity, category NoticeCategory) bool {
+	return item.DetailFetchedAt == "" || archiveIsMissing(item, category)
 }
 
 func (a *App) replaceArchivedOpportunity(updated Opportunity) {

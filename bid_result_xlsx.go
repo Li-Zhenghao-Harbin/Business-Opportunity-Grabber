@@ -304,7 +304,10 @@ func writeSimpleXLSX(path string, item Opportunity, body string, rows []bidPacka
 	defer file.Close()
 	writer := zip.NewWriter(file)
 	defer writer.Close()
-	projectRows := [][]string{{"采购项目编号", item.TenderNo}, {"采购项目名称", item.Title}, {"采购类型", item.NoticeType}, {"招标文件获取截止时间", item.Deadline}, {"开标（截标）时间", extractDeadline(body)}, {"招标人", item.Buyer}}
+	projectRows := [][]string{
+		{"采购项目编号", "采购项目名称", "采购类型", "招标文件获取截止时间", "开标（截标）时间", "招标人"},
+		{item.TenderNo, item.Title, item.NoticeType, item.Deadline, extractDeadline(body), item.Buyer},
+	}
 	packageRows := [][]string{{"分标名称", "分标编号", "包号", "估算金额", "数量", "中标候选人"}}
 	for _, row := range rows {
 		packageRows = append(packageRows, []string{row.SectionName, row.SectionNo, row.PackageNo, strconv.FormatFloat(row.Amount, 'f', -1, 64), strconv.FormatFloat(row.Quantity, 'f', -1, 64), ""})

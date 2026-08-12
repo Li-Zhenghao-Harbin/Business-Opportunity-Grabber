@@ -226,15 +226,13 @@ function updateAutoProgress(progress: AutomationProgress) {
   step.status = progress.status
   step.message = progress.message
   step.percent = progress.percent
-  const terminalNoWork = progress.status === 'no_updates' ||
-    progress.status === 'skipped' ||
-    (progress.status === 'success' && progress.message.includes('网站无更新'))
-  if (progress.substep === '更新状态' && (terminalNoWork || progress.status === 'failed')) {
+  const terminalNoWork = progress.status === 'no_updates' || progress.status === 'skipped'
+  if (progress.substep === '更新状态' && ['success', 'no_updates', 'failed', 'skipped'].includes(progress.status)) {
     step.substeps.forEach((item) => {
       if (item.status === 'pending') {
         item.status = progress.status === 'success' ? 'success' : progress.status
         item.percent = 100
-        item.message = terminalNoWork ? '无新增公告，无需执行' : '本步骤未执行'
+        item.message = terminalNoWork ? '无新增公告，无需执行' : progress.status === 'success' ? '本步骤已完成或不适用' : '本步骤未执行'
       }
     })
   }

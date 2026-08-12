@@ -115,18 +115,27 @@ func TestLiveSingleSourceArchiveDetail(t *testing.T) {
 func TestArchiveNeedsRefreshWhenDetailWasNeverFetched(t *testing.T) {
 	root := t.TempDir()
 	item := Opportunity{Title: "测试公告", ArchivePath: root}
-	if !archiveNeedsRefresh(item) {
+	if !archiveNeedsRefresh(item, NoticeCategory{}) {
 		t.Fatal("archive without fetched detail must be refreshed")
 	}
 	item.DetailFetchedAt = nowString()
-	if !archiveNeedsRefresh(item) {
+	if !archiveNeedsRefresh(item, NoticeCategory{}) {
 		t.Fatal("archive without Word document must be refreshed")
 	}
 	if _, err := writeNoticeDocx(root, item, "正文"); err != nil {
 		t.Fatal(err)
 	}
-	if archiveNeedsRefresh(item) {
+	if archiveNeedsRefresh(item, NoticeCategory{}) {
 		t.Fatal("complete archive should not need refresh")
+	}
+	if !archiveNeedsRefresh(item, NoticeCategory{ID: "sgcc-bid"}) {
+		t.Fatal("bid archive without result workbook must be refreshed")
+	}
+	if err := writeBidResultWorkbook(root, item, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if archiveNeedsRefresh(item, NoticeCategory{ID: "sgcc-bid"}) {
+		t.Fatal("bid archive with result workbook should not need refresh")
 	}
 }
 
