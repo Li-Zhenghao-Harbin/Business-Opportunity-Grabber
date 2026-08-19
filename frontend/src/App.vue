@@ -328,15 +328,23 @@ onBeforeUnmount(removeAutoProgressListener)
       <div class="brand">
         <div>
           <h1>商机提取器</h1>
+          <small>公告归档与项目整理</small>
         </div>
       </div>
 
       <nav>
-        <button :class="{ active: activeTab === 'automatic' }" @click="activeTab = 'automatic'">全自动模式</button>
-        <button :class="{ active: activeTab === 'opportunities' }" @click="activeTab = 'opportunities'">公告库</button>
-        <button :class="{ active: activeTab === 'sites' }" @click="activeTab = 'sites'">站点配置</button>
-        <button :class="{ active: activeTab === 'tasks' }" @click="activeTab = 'tasks'">任务日志</button>
+        <p class="side-title">工作区</p>
+        <button :class="{ active: activeTab === 'automatic' }" @click="activeTab = 'automatic'"><span>全自动模式</span><em>4</em></button>
+        <button :class="{ active: activeTab === 'opportunities' }" @click="activeTab = 'opportunities'"><span>公告库</span><em>{{ opportunities.length }}</em></button>
+        <p class="side-title menu-divider">管理</p>
+        <button :class="{ active: activeTab === 'sites' }" @click="activeTab = 'sites'"><span>站点配置</span><em>{{ sites.length }}</em></button>
+        <button :class="{ active: activeTab === 'tasks' }" @click="activeTab = 'tasks'"><span>执行记录</span><em>{{ tasks.length }}</em></button>
       </nav>
+
+      <div class="sidebar-footer">
+        <span>国家电网</span>
+        <strong>自动归档已启用</strong>
+      </div>
     </aside>
 
     <section class="content">
@@ -348,6 +356,13 @@ onBeforeUnmount(removeAutoProgressListener)
             </button>
             <button :disabled="autoRunning" @click="openArchiveDirectory">打开保存目录</button>
             <button class="danger" :disabled="autoRunning" @click="clearHistory">删除历史</button>
+          </div>
+          <div class="automation-context">
+            <div>
+              <p class="eyebrow">国家电网</p>
+              <h2>全自动归档</h2>
+            </div>
+            <span>PDF 步骤 1.1、1.2、2.1、2.2</span>
           </div>
           <p v-if="message" class="automation-message">{{ message }}</p>
           <div class="overall-progress">
