@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,6 +28,9 @@ type bidPackageRow struct {
 	Quantity    float64
 }
 
+const projectColumnCount = 6
+const packageColumnCount = 5
+
 var xmlInvalidRE = regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
 
 func writeBidResultWorkbook(archivePath string, item Opportunity, body string, attachments []Attachment) error {
@@ -38,6 +42,137 @@ func writeBidResultWorkbook(archivePath string, item Opportunity, body string, a
 		notes = append(notes, "未从公告附件识别到需求一览表或货物清单，请人工复核已下载文件。")
 	}
 	return writeSimpleXLSX(filepath.Join(archivePath, "招标及结果.xlsx"), item, body, rows, notes)
+}
+
+func writeBidStatisticsWorkbook(archiveRoot string) (int, error) {
+	rows := [][]string{}
+	workbookCount := 0
+	err := filepath.WalkDir(archiveRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.EqualFold(entry.Name(), "招标及结果.xlsx") {
+			return nil
+		}
+		projectSheet, err := readXLSXSheetRows(path, "xl/worksheets/sheet1.xml")
+		if err != nil {
+			return fmt.Errorf("无法读取 %s 的招标及结果工作表：%w", path, err)
+		}
+		packageSheet, err := readXLSXSheetRows(path, "xl/worksheets/sheet2.xml")
+		if err != nil {
+			return fmt.Errorf("无法读取 %s 的标包需求工作表：%w", path, err)
+		}
+		rows = appendStatisticsRows(rows, combineBidResultSheets(projectSheet, packageSheet))
+		workbookCount++
+		return nil
+	})
+	if err != nil {
+		return workbookCount, err
+	}
+	if err := writeBidStatisticsXLSX(filepath.Join(archiveRoot, "招标投标统计数据.xlsx"), rows); err != nil {
+		return workbookCount, err
+	}
+	return workbookCount, nil
+}
+
+func readXLSXSheetRows(path string, sheetPath string) ([][]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, err
+	}
+	shared := []string{}
+	var sheet []byte
+	for _, file := range reader.File {
+		content, readErr := readZipFile(file)
+		if readErr != nil {
+			return nil, readErr
+		}
+		switch file.Name {
+		case "xl/sharedStrings.xml":
+			shared = parseSharedStrings(content)
+		case sheetPath:
+			sheet = content
+		}
+	}
+	if len(sheet) == 0 {
+		return nil, fmt.Errorf("未找到工作表 %s", sheetPath)
+	}
+	lines := parseSheetRows(sheet, shared)
+	rows := make([][]string, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, strings.Split(line, "\t"))
+	}
+	return rows, nil
+}
+
+func combineBidResultSheets(projectSheet [][]string, packageSheet [][]string) [][]string {
+	if len(projectSheet) == 0 || len(packageSheet) == 0 {
+		return nil
+	}
+	header := append(normalizeRowWidth(projectSheet[0], projectColumnCount), normalizeRowWidth(packageSheet[0], packageColumnCount)...)
+	rows := [][]string{header}
+	projectData := projectSheet[1:]
+	packageData := cloneRows(packageSheet[1:])
+	fillDownEmptyCells(packageData, packageColumnCount)
+	if len(projectData) == 0 {
+		return rows
+	}
+	if len(packageData) == 0 {
+		for _, projectRow := range projectData {
+			rows = append(rows, append(normalizeRowWidth(projectRow, projectColumnCount), make([]string, packageColumnCount)...))
+		}
+		return rows
+	}
+	for index, packageRow := range packageData {
+		projectRow := projectData[min(index, len(projectData)-1)]
+		rows = append(rows, append(normalizeRowWidth(projectRow, projectColumnCount), normalizeRowWidth(packageRow, packageColumnCount)...))
+	}
+	return rows
+}
+
+func appendStatisticsRows(target [][]string, source [][]string) [][]string {
+	if len(source) == 0 {
+		return target
+	}
+	if len(target) == 0 {
+		return append(target, source...)
+	}
+	return append(target, source[1:]...)
+}
+
+func normalizeRowWidth(row []string, width int) []string {
+	result := make([]string, width)
+	copy(result, row)
+	return result
+}
+
+func cloneRows(rows [][]string) [][]string {
+	cloned := make([][]string, len(rows))
+	for index, row := range rows {
+		cloned[index] = append([]string(nil), row...)
+	}
+	return cloned
+}
+
+func fillDownEmptyCells(rows [][]string, columns int) {
+	lastValues := make([]string, columns)
+	for rowIndex, row := range rows {
+		for index := 0; index < columns; index++ {
+			if index >= len(row) {
+				row = append(row, make([]string, index-len(row)+1)...)
+			}
+			if strings.TrimSpace(row[index]) == "" {
+				row[index] = lastValues[index]
+			} else {
+				lastValues[index] = row[index]
+			}
+		}
+		rows[rowIndex] = row
+	}
 }
 
 func bidResultWorkbookNeedsRefresh(path string, attachments []Attachment) bool {
@@ -67,7 +202,11 @@ func bidResultWorkbookNeedsRefresh(path string, attachments []Attachment) bool {
 		if err != nil {
 			return true
 		}
-		return bytes.Count(content, []byte("<row ")) <= 1
+		if bytes.Count(content, []byte("<row ")) <= 1 || bytes.Contains(content, []byte("中标候选人")) {
+			return true
+		}
+		projectRows, err := readXLSXSheetRows(path, "xl/worksheets/sheet1.xml")
+		return err != nil || len(projectRows) < 2 || len(projectRows[1]) < 5 || strings.TrimSpace(projectRows[1][4]) == ""
 	}
 	return true
 }
@@ -310,6 +449,9 @@ func extractBidRows(rows []string) []bidPackageRow {
 			packageNo := packageCode
 			parsedSectionNo, parsedPackageNo := parseBidPackageCode(packageCode)
 			if rowSectionName == "" {
+				rowSectionName = cellAt(values, columns.projectName)
+			}
+			if rowSectionName == "" {
 				rowSectionName = sectionName
 			}
 			if rowSectionNo == "" {
@@ -352,10 +494,10 @@ func parseBidPackageCode(value string) (string, string) {
 	return "", ""
 }
 
-type bidColumnIndexes struct{ sectionName, sectionNo, packageNo, amount, quantity int }
+type bidColumnIndexes struct{ sectionName, sectionNo, packageNo, projectName, amount, quantity int }
 
 func bidColumns(headings []string) bidColumnIndexes {
-	result := bidColumnIndexes{-1, -1, -1, -1, -1}
+	result := bidColumnIndexes{-1, -1, -1, -1, -1, -1}
 	for index, heading := range headings {
 		value := strings.ReplaceAll(strings.ToLower(heading), " ", "")
 		switch {
@@ -365,6 +507,8 @@ func bidColumns(headings []string) bidColumnIndexes {
 			result.sectionNo = index
 		case strings.Contains(value, "包号") || strings.Contains(value, "包编号") || strings.Contains(value, "分包编号"):
 			result.packageNo = index
+		case strings.Contains(value, "项目名称"):
+			result.projectName = index
 		case strings.Contains(value, "估算金额") || strings.Contains(value, "预估金额") || strings.Contains(value, "最高限价") || strings.Contains(value, "金额"):
 			result.amount = index
 		case strings.Contains(value, "数量"):
@@ -418,11 +562,11 @@ func writeSimpleXLSX(path string, item Opportunity, body string, rows []bidPacka
 	defer writer.Close()
 	projectRows := [][]string{
 		{"采购项目编号", "采购项目名称", "采购类型", "招标文件获取截止时间", "开标（截标）时间", "招标人"},
-		{item.TenderNo, item.Title, item.NoticeType, item.Deadline, extractDeadline(body), item.Buyer},
+		{item.TenderNo, item.Title, item.NoticeType, extractBidBookDeadline(body, item.Deadline), extractOpenBidTime(body), item.Buyer},
 	}
-	packageRows := [][]string{{"分标名称", "分标编号", "包号", "估算金额", "数量", "中标候选人"}}
+	packageRows := [][]string{{"分标名称", "分标编号", "包号", "估算金额", "数量"}}
 	for _, row := range rows {
-		packageRows = append(packageRows, []string{row.SectionName, row.SectionNo, row.PackageNo, strconv.FormatFloat(row.Amount, 'f', -1, 64), strconv.FormatFloat(row.Quantity, 'f', -1, 64), ""})
+		packageRows = append(packageRows, []string{row.SectionName, row.SectionNo, row.PackageNo, strconv.FormatFloat(row.Amount, 'f', -1, 64), strconv.FormatFloat(row.Quantity, 'f', -1, 64)})
 	}
 	noteRows := [][]string{{"处理说明"}}
 	for _, note := range notes {
@@ -450,10 +594,58 @@ func writeSimpleXLSX(path string, item Opportunity, body string, rows []bidPacka
 	return nil
 }
 
-func extractDeadline(body string) string {
+func writeBidStatisticsXLSX(path string, rows [][]string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := zip.NewWriter(file)
+	defer writer.Close()
+	parts := map[string]string{
+		"[Content_Types].xml":        xlsxStatisticsContentTypes,
+		"_rels/.rels":                xlsxRootRels,
+		"xl/workbook.xml":            xlsxStatisticsWorkbook,
+		"xl/_rels/workbook.xml.rels": xlsxStatisticsWorkbookRels,
+		"xl/styles.xml":              xlsxStyles,
+		"xl/worksheets/sheet1.xml":   xlsxSheetXML(rows, false),
+	}
+	for name, content := range parts {
+		entry, createErr := writer.Create(name)
+		if createErr != nil {
+			return createErr
+		}
+		if _, writeErr := entry.Write([]byte(content)); writeErr != nil {
+			return writeErr
+		}
+	}
+	return nil
+}
+
+func extractBidBookDeadline(body string, fallback string) string {
+	if value := extractNoticeTime(body, "招标文件获取截止时间", "BIDBOOK_BUY_END_TIME"); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func extractOpenBidTime(body string) string {
+	if value := extractNoticeTime(body, "开标（截标）时间", "OPENBID_TIME"); value != "" {
+		return value
+	}
 	match := regexp.MustCompile(`(?:开标|截标|应答文件).*?(\d{4}[-年/]\d{1,2}[-月/]\d{1,2}[^\n]{0,24})`).FindStringSubmatch(body)
 	if len(match) > 1 {
 		return normalizeText(match[1])
+	}
+	return ""
+}
+
+func extractNoticeTime(body string, labels ...string) string {
+	for _, label := range labels {
+		match := regexp.MustCompile(regexp.QuoteMeta(label) + `\s*[：:]\s*([^\n]+)`).FindStringSubmatch(body)
+		if len(match) > 1 {
+			return normalizeText(match[1])
+		}
 	}
 	return ""
 }
@@ -495,4 +687,7 @@ const xlsxContentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="ht
 const xlsxRootRels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`
 const xlsxWorkbook = `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="招标及结果" sheetId="1" r:id="rId1"/><sheet name="标包需求" sheetId="2" r:id="rId2"/><sheet name="处理说明" sheetId="3" r:id="rId3"/></sheets></workbook>`
 const xlsxWorkbookRels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
+const xlsxStatisticsContentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`
+const xlsxStatisticsWorkbook = `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="招标投标统计数据" sheetId="1" r:id="rId1"/></sheets></workbook>`
+const xlsxStatisticsWorkbookRels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`
 const xlsxStyles = `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><color rgb="FFFF0000"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf xfId="0"/><xf xfId="0" fontId="1" applyFont="1"/></cellXfs></styleSheet>`

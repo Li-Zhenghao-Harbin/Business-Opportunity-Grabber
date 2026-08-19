@@ -106,6 +106,30 @@ func TestExtractBidRowsSummarizesUniquePackageInSingleSheet(t *testing.T) {
 	}
 }
 
+func TestExtractBidRowsUsesProjectNameWhenSectionNameIsEmpty(t *testing.T) {
+	rows := extractBidRows([]string{
+		"需求一览表",
+		"分标名称\t分标编号\t包号\t包名称(项目名称)\t估算金额",
+		"\tSB-01\t包01\t配电自动化改造项目\t128.5",
+	})
+	if len(rows) != 1 || rows[0].SectionName != "配电自动化改造项目" {
+		t.Fatalf("expected project name to fill empty section name, got %#v", rows)
+	}
+}
+
+func TestBidTimingFieldsPopulateWorkbookTimes(t *testing.T) {
+	body := appendBidTimingFields("公告正文", map[string]any{
+		"BIDBOOK_BUY_END_TIME": "2026-08-25 17:00:00",
+		"OPENBID_TIME":         "2026-09-08 10:00:00",
+	})
+	if deadline := extractBidBookDeadline(body, ""); deadline != "2026-08-25 17:00:00" {
+		t.Fatalf("unexpected bid document deadline: %q", deadline)
+	}
+	if openBidTime := extractOpenBidTime(body); openBidTime != "2026-09-08 10:00:00" {
+		t.Fatalf("unexpected open bid time: %q", openBidTime)
+	}
+}
+
 func TestUnzipBidAttachmentExpandsNestedZIP(t *testing.T) {
 	inner := newZIPBytes(t, map[string][]byte{"招标公告272635ZZ/需求一览表.xlsx": []byte("workbook")})
 	outer := newZIPBytes(t, map[string][]byte{"招标公告272635ZZ.zip": inner})
@@ -127,6 +151,54 @@ func TestUnzipBidAttachmentExpandsNestedZIP(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected nested workbook path %q, got %#v", expected, paths)
+	}
+}
+
+func TestWriteBidStatisticsWorkbookCombinesSheetsAndFillsDown(t *testing.T) {
+	root := t.TempDir()
+	firstDir := filepath.Join(root, "2026-08-01项目甲")
+	secondDir := filepath.Join(root, "2026-08-02项目乙")
+	if err := os.MkdirAll(firstDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secondDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSimpleXLSX(filepath.Join(firstDir, "招标及结果.xlsx"), Opportunity{TenderNo: "P-1", Title: "项目甲", NoticeType: "招标公告", Buyer: "招标人甲"}, "", []bidPackageRow{{SectionName: "分标甲", SectionNo: "SB-1", PackageNo: "包01", Amount: 10, Quantity: 2}, {PackageNo: "包02", Amount: 20, Quantity: 3}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSimpleXLSX(filepath.Join(secondDir, "招标及结果.xlsx"), Opportunity{TenderNo: "P-2", Title: "项目乙", NoticeType: "招标公告", Buyer: "招标人乙"}, "", []bidPackageRow{{SectionName: "分标乙", SectionNo: "SB-2", PackageNo: "包02", Amount: 20, Quantity: 3}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	count, err := writeBidStatisticsWorkbook(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected two source workbooks, got %d", count)
+	}
+	statisticsPath := filepath.Join(root, "招标投标统计数据.xlsx")
+	rows, err := readXLSXSheetRows(statisticsPath, "xl/worksheets/sheet1.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readXLSXSheetRows(statisticsPath, "xl/worksheets/sheet2.xml"); err == nil {
+		t.Fatal("statistics workbook should contain only one sheet")
+	}
+	if len(rows) != 4 {
+		t.Fatalf("unexpected combined row count: %#v", rows)
+	}
+	if len(rows[0]) != 11 || rows[0][0] != "采购项目编号" || rows[0][6] != "分标名称" {
+		t.Fatalf("expected horizontally combined headers, got %#v", rows[0])
+	}
+	if rows[1][0] != "P-1" || rows[1][6] != "分标甲" || rows[1][7] != "SB-1" || rows[1][8] != "包01" {
+		t.Fatalf("unexpected first combined data row: %#v", rows[1])
+	}
+	if rows[2][0] != "P-1" || rows[2][6] != "分标甲" || rows[2][7] != "SB-1" || rows[2][8] != "包02" {
+		t.Fatalf("expected repeated project and package fields, got %#v", rows[2])
+	}
+	if rows[3][0] != "P-2" || rows[3][6] != "分标乙" || rows[3][7] != "SB-2" {
+		t.Fatalf("unexpected second combined data row: %#v", rows[3])
 	}
 }
 

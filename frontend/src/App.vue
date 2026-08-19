@@ -342,8 +342,7 @@ onBeforeUnmount(removeAutoProgressListener)
       </nav>
 
       <div class="sidebar-footer">
-        <span>国家电网</span>
-        <strong>自动归档已启用</strong>
+        <strong>v 0.3</strong>
       </div>
     </aside>
 

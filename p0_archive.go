@@ -330,6 +330,7 @@ func (a *App) fetchSGCCBidDetail(item Opportunity) (sgccArchiveDetail, error) {
 				body = strings.Join(lines, "\n")
 			}
 		}
+		body = appendBidTimingFields(body, result.Notice)
 		attachments := []sgccAttachmentSource{}
 		if sgccFileAvailable(result.FileFlag) {
 			attachments = sgccBidAnnouncementSources(item)
@@ -340,6 +341,22 @@ func (a *App) fetchSGCCBidDetail(item Opportunity) (sgccArchiveDetail, error) {
 		lastErr = fmt.Errorf("资格预审详情接口未返回正文")
 	}
 	return sgccArchiveDetail{}, lastErr
+}
+
+func appendBidTimingFields(body string, notice map[string]any) string {
+	lines := []string{strings.TrimSpace(body)}
+	for _, field := range []struct {
+		key   string
+		label string
+	}{
+		{key: "BIDBOOK_BUY_END_TIME", label: "招标文件获取截止时间"},
+		{key: "OPENBID_TIME", label: "开标（截标）时间"},
+	} {
+		if value, ok := mapString(notice, field.key); ok {
+			lines = append(lines, field.label+"："+value)
+		}
+	}
+	return strings.Join(cleanList(lines), "\n")
 }
 
 func sgccBidAnnouncementSources(item Opportunity) []sgccAttachmentSource {
@@ -382,7 +399,7 @@ func flattenRecord(title string, record map[string]any) []string {
 		return nil
 	}
 	lines := []string{title}
-	for _, key := range []string{"PLAN_NAME", "PLANNAME", "PROJECT_NAME", "PROJECTNAME", "PUR_ORG_NAME", "PURORGNAME", "PUBLISH_ORG_NAME", "PUBLISHORGNAME", "PLAN_CODE", "PLANCODE", "NOTICE_TYPE_NAME", "NOTE", "CONTENT", "CONT"} {
+	for _, key := range []string{"PLAN_NAME", "PLANNAME", "PROJECT_NAME", "PROJECTNAME", "PUR_ORG_NAME", "PURORGNAME", "PUBLISH_ORG_NAME", "PUBLISHORGNAME", "PLAN_CODE", "PLANCODE", "NOTICE_TYPE_NAME", "BIDBOOK_BUY_END_TIME", "OPENBID_TIME", "NOTE", "CONTENT", "CONT"} {
 		if value, ok := mapString(record, key); ok {
 			value = documentTextFromHTML(value)
 			if value != "" {

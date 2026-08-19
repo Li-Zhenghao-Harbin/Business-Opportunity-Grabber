@@ -584,6 +584,16 @@ func (a *App) RunSGCCAutoPages1To7() ([]CrawlTask, error) {
 		case "failed":
 			message = task.ErrorMessage
 		}
+		if category.ID == "sgcc-bid" && task.Status != "failed" {
+			a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: "running", Message: "正在汇总招标投标统计数据", Percent: 100, Substep: "生成招标及结果 Excel", SubstepPercent: 90})
+			workbookCount, err := writeBidStatisticsWorkbook(a.GetArchiveConfig().RootPath)
+			if err != nil {
+				progressStatus = "failed"
+				message = fmt.Sprintf("招标投标统计数据汇总失败：%v", err)
+			} else {
+				message = fmt.Sprintf("%s，已汇总 %d 份招标及结果.xlsx", message, workbookCount)
+			}
+		}
 		a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: progressStatus, Message: message, Percent: 100, Substep: "更新状态", SubstepPercent: 100})
 	}
 	return tasks, nil
