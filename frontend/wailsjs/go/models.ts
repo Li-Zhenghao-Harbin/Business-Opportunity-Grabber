@@ -112,6 +112,7 @@ export namespace main {
 	    deletedOpportunities: number;
 	    deletedTasks: number;
 	    deletedFolders: number;
+	    deletedArchiveEntries: number;
 
 	    static createFrom(source: any = {}) {
 	        return new HistoryClearResult(source);
@@ -122,6 +123,7 @@ export namespace main {
 	        this.deletedOpportunities = source["deletedOpportunities"];
 	        this.deletedTasks = source["deletedTasks"];
 	        this.deletedFolders = source["deletedFolders"];
+	        this.deletedArchiveEntries = source["deletedArchiveEntries"];
 	    }
 	}
 	export class NoticeCategory {

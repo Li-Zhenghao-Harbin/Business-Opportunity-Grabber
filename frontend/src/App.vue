@@ -82,7 +82,7 @@ const siteForm = reactive(new main.SiteConfig({
   baseUrl: '',
   enabled: true,
   renderMode: 'http',
-  dateRangeDays: 7,
+  dateRangeDays: 3,
   minIntervalMs: 1500,
   maxRetries: 3,
   categories: [],
@@ -104,7 +104,7 @@ function resetSiteForm() {
     baseUrl: '',
     enabled: true,
     renderMode: 'http',
-    dateRangeDays: 7,
+    dateRangeDays: 3,
     minIntervalMs: 1500,
     maxRetries: 3,
     categories: [],
@@ -256,13 +256,15 @@ async function startAutomaticMode() {
 }
 
 async function clearHistory() {
-  if (!confirm('将删除公告记录、任务日志、抓取水位及已归档文件。清理后需点击“执行”才会重新抓取，确认继续？')) return
+  if (!confirm('将删除公告记录、任务日志、抓取水位，以及公告归档目录中的全部内容。清理后需点击“执行”才会重新抓取，确认继续？')) return
   autoRunning.value = true
   try {
     const result = await ClearHistory()
     selectedOpportunity.value = null
     autoSteps.value = createAutoSteps()
-    message.value = `历史已删除：${result.deletedOpportunities} 条公告、${result.deletedTasks} 条任务、${result.deletedFolders} 个归档目录。请点击“执行”重新抓取。`
+    const summary = `历史与公告归档目录已清空：${result.deletedOpportunities} 条公告、${result.deletedTasks} 条任务、${result.deletedArchiveEntries} 项归档内容。请点击“执行”重新抓取。`
+    message.value = summary
+    alert(summary)
     await refreshAll()
   } catch (error) {
     message.value = error instanceof Error ? error.message : String(error)

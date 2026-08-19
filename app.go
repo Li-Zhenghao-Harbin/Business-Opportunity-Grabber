@@ -166,9 +166,10 @@ type AutomationProgress struct {
 }
 
 type HistoryClearResult struct {
-	DeletedOpportunities int `json:"deletedOpportunities"`
-	DeletedTasks         int `json:"deletedTasks"`
-	DeletedFolders       int `json:"deletedFolders"`
+	DeletedOpportunities  int `json:"deletedOpportunities"`
+	DeletedTasks          int `json:"deletedTasks"`
+	DeletedFolders        int `json:"deletedFolders"`
+	DeletedArchiveEntries int `json:"deletedArchiveEntries"`
 }
 
 type Dashboard struct {
@@ -340,7 +341,7 @@ func defaultSGCCSite() SiteConfig {
 		BaseURL:       defaultSGCCURL,
 		Enabled:       true,
 		RenderMode:    "http",
-		DateRangeDays: 7,
+		DateRangeDays: 3,
 		MinIntervalMS: 1500,
 		MaxRetries:    3,
 		Categories:    defaultSGCCCategories(),
@@ -376,7 +377,7 @@ func defaultCSGSite() SiteConfig {
 		BaseURL:       defaultCSGURL,
 		Enabled:       true,
 		RenderMode:    "http",
-		DateRangeDays: 7,
+		DateRangeDays: 3,
 		MinIntervalMS: 1500,
 		MaxRetries:    3,
 		CreatedAt:     now,
@@ -592,6 +593,7 @@ func (a *App) RunSGCCAutoPages1To7() ([]CrawlTask, error) {
 				message = fmt.Sprintf("招标投标统计数据汇总失败：%v", err)
 			} else {
 				message = fmt.Sprintf("%s，已汇总 %d 份招标及结果.xlsx", message, workbookCount)
+				a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: "running", Message: "招标及结果 Excel 与统计数据已生成", Percent: 100, Substep: "生成招标及结果 Excel", SubstepPercent: 100})
 			}
 		}
 		a.emitAutomationProgress(AutomationProgress{Current: step, Total: len(categoryIDs), Title: category.Name, Status: progressStatus, Message: message, Percent: 100, Substep: "更新状态", SubstepPercent: 100})
@@ -609,12 +611,6 @@ func (a *App) ClearHistory() (HistoryClearResult, error) {
 		DeletedTasks:         len(a.state.Tasks),
 	}
 	archiveRoot := a.state.Archive.RootPath
-	archivePaths := make([]string, 0, len(a.state.Opportunities))
-	for _, item := range a.state.Opportunities {
-		if item.ArchivePath != "" {
-			archivePaths = append(archivePaths, item.ArchivePath)
-		}
-	}
 	// Persist empty arrays rather than null so the desktop bridge and UI can treat a cleared history as a normal empty state.
 	a.state.Opportunities = []Opportunity{}
 	a.state.Tasks = []CrawlTask{}
@@ -627,16 +623,40 @@ func (a *App) ClearHistory() (HistoryClearResult, error) {
 	}
 	a.mu.Unlock()
 
-	for _, archivePath := range cleanList(archivePaths) {
-		if !isWithinDirectory(archivePath, archiveRoot) {
-			continue
-		}
-		if err := os.RemoveAll(archivePath); err != nil {
-			return result, fmt.Errorf("无法删除历史归档 %s：%w", archivePath, err)
-		}
-		result.DeletedFolders++
+	deletedEntries, err := clearArchiveDirectory(archiveRoot)
+	if err != nil {
+		return result, err
 	}
+	result.DeletedArchiveEntries = deletedEntries
+	result.DeletedFolders = deletedEntries
 	return result, nil
+}
+
+func clearArchiveDirectory(root string) (int, error) {
+	if strings.TrimSpace(root) == "" {
+		return 0, nil
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return 0, err
+	}
+	volumeRoot := filepath.Clean(filepath.VolumeName(absRoot) + string(os.PathSeparator))
+	if filepath.Clean(absRoot) == volumeRoot {
+		return 0, errors.New("公告归档目录不能是磁盘根目录")
+	}
+	entries, err := os.ReadDir(absRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("无法读取公告归档目录：%w", err)
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(absRoot, entry.Name())); err != nil {
+			return 0, fmt.Errorf("无法删除公告归档内容 %s：%w", entry.Name(), err)
+		}
+	}
+	return len(entries), nil
 }
 
 func (a *App) OpenArchiveDirectory() error {

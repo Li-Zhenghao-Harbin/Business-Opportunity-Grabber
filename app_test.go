@@ -65,6 +65,9 @@ func TestDefaultSitesIncludesCSG(t *testing.T) {
 
 func TestDefaultSGCCSiteIncludesP0Categories(t *testing.T) {
 	site := defaultSGCCSite()
+	if site.DateRangeDays != 3 {
+		t.Fatalf("expected a three-day default range, got %d", site.DateRangeDays)
+	}
 	if len(site.Categories) != 4 {
 		t.Fatalf("expected 4 SGCC auto categories, got %d", len(site.Categories))
 	}
@@ -513,6 +516,9 @@ func TestClearHistoryResetsWatermarksAndArchiveFolders(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(archivePath, "测试公告.docx"), []byte("test"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "招标投标统计数据.xlsx"), []byte("summary"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	storePath := filepath.Join(t.TempDir(), "opportunity-data.json")
 	app := NewApp()
 	app.storePath = storePath
@@ -527,7 +533,7 @@ func TestClearHistoryResetsWatermarksAndArchiveFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeletedOpportunities != 1 || result.DeletedTasks != 1 || result.DeletedFolders != 1 {
+	if result.DeletedOpportunities != 1 || result.DeletedTasks != 1 || result.DeletedFolders != 2 || result.DeletedArchiveEntries != 2 {
 		t.Fatalf("unexpected clear result: %#v", result)
 	}
 	if len(app.state.Opportunities) != 0 || len(app.state.Tasks) != 0 || len(app.state.Sites[0].Watermarks) != 0 {
@@ -536,7 +542,7 @@ func TestClearHistoryResetsWatermarksAndArchiveFolders(t *testing.T) {
 	if app.state.Opportunities == nil || app.state.Tasks == nil || app.state.Sites[0].Watermarks == nil {
 		t.Fatal("cleared collections must remain empty arrays")
 	}
-	if _, err := os.Stat(archivePath); !os.IsNotExist(err) {
-		t.Fatalf("archive folder should be removed, got %v", err)
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("archive root should be empty, entries=%#v, err=%v", entries, err)
 	}
 }
