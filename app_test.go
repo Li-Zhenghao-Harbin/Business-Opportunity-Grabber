@@ -89,6 +89,66 @@ func TestMergeBidPackageRows(t *testing.T) {
 	}
 }
 
+func TestExtractBidRowsSummarizesUniquePackageInSingleSheet(t *testing.T) {
+	rows := extractBidRows([]string{
+		"国网甘肃电力2026年采购（综合服务标段）需求一览表",
+		"分包编号\t包名称\t含税最高限价(万元)\t数量",
+		"272635-9003001-9998-包01\t项目甲\t125\t2",
+		"272635-9003001-9998-包01\t项目乙\t2.5\t1",
+	})
+	rows = mergeBidPackageRows(rows)
+	if len(rows) != 1 {
+		t.Fatalf("expected one unique package, got %#v", rows)
+	}
+	row := rows[0]
+	if row.SectionName != "综合服务标段" || row.SectionNo != "9003001" || row.PackageNo != "包01" || row.Amount != 127.5 || row.Quantity != 3 {
+		t.Fatalf("unexpected summarized package: %#v", row)
+	}
+}
+
+func TestUnzipBidAttachmentExpandsNestedZIP(t *testing.T) {
+	inner := newZIPBytes(t, map[string][]byte{"招标公告272635ZZ/需求一览表.xlsx": []byte("workbook")})
+	outer := newZIPBytes(t, map[string][]byte{"招标公告272635ZZ.zip": inner})
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "招标公告.zip")
+	if err := os.WriteFile(zipPath, outer, 0644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := unzipBidAttachment(zipPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(root, "招标公告", "招标公告272635ZZ", "招标公告272635ZZ", "需求一览表.xlsx")
+	found := false
+	for _, path := range paths {
+		if path == expected {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected nested workbook path %q, got %#v", expected, paths)
+	}
+}
+
+func newZIPBytes(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	for name, content := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
 func TestDateCutoffIncludesCurrentDay(t *testing.T) {
 	today := time.Now().Format("2006-01-02")
 	if !isOnOrAfterCutoffDate(today, cutoffDateForDays(1)) {
@@ -152,6 +212,20 @@ func TestLiveBidAnnouncementDetailAndDownload(t *testing.T) {
 		if !strings.HasPrefix(path, filepath.Join(root, "招标公告")) || strings.Contains(filepath.Base(path), "�") {
 			t.Fatalf("unexpected extracted path: %q", path)
 		}
+	}
+	rows, notes := collectBidPackageRows(root, []Attachment{{Name: "招标公告.zip", LocalPath: zipPath, Status: "已下载"}})
+	if len(rows) == 0 {
+		t.Fatalf("expected package demand rows from the real announcement, notes: %#v", notes)
+	}
+	found := false
+	for _, row := range rows {
+		if row.SectionName == "信息系统服务标段" && row.SectionNo == "9007001" && row.PackageNo == "包01" && row.Amount == 9.6142 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected known package from the real announcement, got %#v", rows[:min(10, len(rows))])
 	}
 }
 

@@ -362,7 +362,6 @@ onBeforeUnmount(removeAutoProgressListener)
               <p class="eyebrow">国家电网</p>
               <h2>全自动归档</h2>
             </div>
-            <span>PDF 步骤 1.1、1.2、2.1、2.2</span>
           </div>
           <p v-if="message" class="automation-message">{{ message }}</p>
           <div class="overall-progress">

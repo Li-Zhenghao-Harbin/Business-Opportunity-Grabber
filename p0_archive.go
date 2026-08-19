@@ -463,8 +463,11 @@ func archiveIsMissing(item Opportunity, category NoticeCategory) bool {
 		return true
 	}
 	if category.ID == "sgcc-bid" {
-		_, err = os.Stat(filepath.Join(item.ArchivePath, "招标及结果.xlsx"))
-		return err != nil
+		workbookPath := filepath.Join(item.ArchivePath, "招标及结果.xlsx")
+		if _, err = os.Stat(workbookPath); err != nil {
+			return true
+		}
+		return bidResultWorkbookNeedsRefresh(workbookPath, item.Attachments)
 	}
 	return false
 }

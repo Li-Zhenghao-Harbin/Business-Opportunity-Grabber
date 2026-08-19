@@ -40,6 +40,38 @@ func writeBidResultWorkbook(archivePath string, item Opportunity, body string, a
 	return writeSimpleXLSX(filepath.Join(archivePath, "招标及结果.xlsx"), item, body, rows, notes)
 }
 
+func bidResultWorkbookNeedsRefresh(path string, attachments []Attachment) bool {
+	hasZIP := false
+	for _, attachment := range attachments {
+		if attachment.Status == "已下载" && strings.EqualFold(filepath.Ext(attachment.LocalPath), ".zip") {
+			hasZIP = true
+			break
+		}
+	}
+	if !hasZIP {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return true
+	}
+	for _, file := range reader.File {
+		if file.Name != "xl/worksheets/sheet2.xml" {
+			continue
+		}
+		content, err := readZipFile(file)
+		if err != nil {
+			return true
+		}
+		return bytes.Count(content, []byte("<row ")) <= 1
+	}
+	return true
+}
+
 func collectBidPackageRows(archivePath string, attachments []Attachment) ([]bidPackageRow, []string) {
 	var rows []bidPackageRow
 	var notes []string
@@ -78,6 +110,13 @@ func collectBidPackageRows(archivePath string, attachments []Attachment) ([]bidP
 }
 
 func unzipBidAttachment(zipPath, archivePath string) ([]string, error) {
+	return unzipBidAttachmentAtDepth(zipPath, archivePath, 0)
+}
+
+func unzipBidAttachmentAtDepth(zipPath, archivePath string, depth int) ([]string, error) {
+	if depth >= 4 {
+		return nil, fmt.Errorf("压缩包嵌套层级超过 4 层")
+	}
 	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return nil, err
@@ -93,6 +132,7 @@ func unzipBidAttachment(zipPath, archivePath string) ([]string, error) {
 		return nil, err
 	}
 	var paths []string
+	var nestedZIPs []string
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() {
 			continue
@@ -126,6 +166,16 @@ func unzipBidAttachment(zipPath, archivePath string) ([]string, error) {
 			return nil, err
 		}
 		paths = append(paths, extractedPath)
+		if strings.EqualFold(filepath.Ext(extractedPath), ".zip") {
+			nestedZIPs = append(nestedZIPs, extractedPath)
+		}
+	}
+	for _, nestedZIP := range nestedZIPs {
+		nestedPaths, err := unzipBidAttachmentAtDepth(nestedZIP, filepath.Dir(nestedZIP), depth+1)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, nestedPaths...)
 	}
 	return paths, nil
 }
@@ -241,6 +291,7 @@ func parseSheetRows(raw []byte, shared []string) []string {
 }
 
 func extractBidRows(rows []string) []bidPackageRow {
+	sectionName := sectionNameFromRows(rows)
 	for index, row := range rows {
 		headings := strings.Split(row, "\t")
 		columns := bidColumns(headings)
@@ -250,13 +301,26 @@ func extractBidRows(rows []string) []bidPackageRow {
 		var result []bidPackageRow
 		for _, dataRow := range rows[index+1:] {
 			values := strings.Split(dataRow, "\t")
-			packageNo := cellAt(values, columns.packageNo)
-			if packageNo == "" {
+			packageCode := cellAt(values, columns.packageNo)
+			if packageCode == "" {
 				continue
 			}
+			rowSectionName := cellAt(values, columns.sectionName)
+			rowSectionNo := cellAt(values, columns.sectionNo)
+			packageNo := packageCode
+			parsedSectionNo, parsedPackageNo := parseBidPackageCode(packageCode)
+			if rowSectionName == "" {
+				rowSectionName = sectionName
+			}
+			if rowSectionNo == "" {
+				rowSectionNo = parsedSectionNo
+			}
+			if parsedPackageNo != "" {
+				packageNo = parsedPackageNo
+			}
 			result = append(result, bidPackageRow{
-				SectionName: cellAt(values, columns.sectionName),
-				SectionNo:   cellAt(values, columns.sectionNo),
+				SectionName: rowSectionName,
+				SectionNo:   rowSectionNo,
 				PackageNo:   packageNo,
 				Amount:      numberAt(values, columns.amount),
 				Quantity:    numberAt(values, columns.quantity),
@@ -265,6 +329,27 @@ func extractBidRows(rows []string) []bidPackageRow {
 		return result
 	}
 	return nil
+}
+
+func sectionNameFromRows(rows []string) string {
+	for _, row := range rows {
+		for _, value := range strings.Split(row, "\t") {
+			match := regexp.MustCompile(`[（(]([^（）()]+标段)[）)]`).FindStringSubmatch(value)
+			if len(match) == 2 {
+				return normalizeText(match[1])
+			}
+		}
+	}
+	return ""
+}
+
+func parseBidPackageCode(value string) (string, string) {
+	value = normalizeText(value)
+	match := regexp.MustCompile(`^.+?-([^-]+)-[^-]+-(包[^\s]+)$`).FindStringSubmatch(value)
+	if len(match) == 3 {
+		return match[1], match[2]
+	}
+	return "", ""
 }
 
 type bidColumnIndexes struct{ sectionName, sectionNo, packageNo, amount, quantity int }
@@ -278,9 +363,9 @@ func bidColumns(headings []string) bidColumnIndexes {
 			result.sectionName = index
 		case strings.Contains(value, "分标编号"):
 			result.sectionNo = index
-		case strings.Contains(value, "包号") || strings.Contains(value, "包编号"):
+		case strings.Contains(value, "包号") || strings.Contains(value, "包编号") || strings.Contains(value, "分包编号"):
 			result.packageNo = index
-		case strings.Contains(value, "估算金额") || strings.Contains(value, "预估金额") || strings.Contains(value, "金额"):
+		case strings.Contains(value, "估算金额") || strings.Contains(value, "预估金额") || strings.Contains(value, "最高限价") || strings.Contains(value, "金额"):
 			result.amount = index
 		case strings.Contains(value, "数量"):
 			result.quantity = index
