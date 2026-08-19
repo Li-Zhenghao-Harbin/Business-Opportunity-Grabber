@@ -1161,9 +1161,9 @@ func sgccNoticeToOpportunity(notice sgccNotice, site SiteConfig, req CrawlReques
 		noticeID = jsonValueString(notice.ID)
 	}
 	docID := jsonValueString(notice.FirstPageDocID)
-	routeDocID := docID
+	routeDocID := noticeID
 	if routeDocID == "" {
-		routeDocID = noticeID
+		routeDocID = docID
 	}
 	menuID := jsonValueString(notice.FirstPageMenuID)
 	if menuID == "" {

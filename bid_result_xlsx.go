@@ -8,11 +8,15 @@ import (
 	"html"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 type bidPackageRow struct {
@@ -79,25 +83,37 @@ func unzipBidAttachment(zipPath, archivePath string) ([]string, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	base := filepath.Join(archivePath, "公告文件")
+	folderName := strings.TrimSuffix(filepath.Base(zipPath), filepath.Ext(zipPath))
+	folderName = trimFileName(sanitizeFileName(folderName), 120)
+	if folderName == "" {
+		folderName = "公告文件"
+	}
+	base := filepath.Join(archivePath, folderName)
+	if err := os.MkdirAll(base, 0755); err != nil {
+		return nil, err
+	}
 	var paths []string
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() {
 			continue
 		}
-		name := filepath.Base(file.Name)
-		if name == "." || name == "" {
+		name := strings.ReplaceAll(decodeZIPEntryName(file.Name, file.NonUTF8), "\\", "/")
+		name = path.Clean(name)
+		if name == "." || name == "" || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") {
 			continue
 		}
-		path := filepath.Join(base, sanitizeFileName(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		extractedPath := filepath.Join(base, filepath.FromSlash(name))
+		if !isWithinDirectory(extractedPath, base) {
+			return nil, fmt.Errorf("压缩包包含不安全的文件路径：%s", file.Name)
+		}
+		if err := os.MkdirAll(filepath.Dir(extractedPath), 0755); err != nil {
 			return nil, err
 		}
 		in, err := file.Open()
 		if err != nil {
 			return nil, err
 		}
-		out, err := os.Create(path)
+		out, err := os.Create(extractedPath)
 		if err == nil {
 			_, err = io.Copy(out, io.LimitReader(in, 128*1024*1024))
 			closeErr := out.Close()
@@ -109,9 +125,20 @@ func unzipBidAttachment(zipPath, archivePath string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		paths = append(paths, path)
+		paths = append(paths, extractedPath)
 	}
 	return paths, nil
+}
+
+func decodeZIPEntryName(name string, nonUTF8 bool) string {
+	if !nonUTF8 {
+		return name
+	}
+	decoded, _, err := transform.Bytes(simplifiedchinese.GBK.NewDecoder(), []byte(name))
+	if err != nil || strings.TrimSpace(string(decoded)) == "" {
+		return name
+	}
+	return string(decoded)
 }
 
 func readBidRowsFromXLSX(path string) ([]bidPackageRow, string) {

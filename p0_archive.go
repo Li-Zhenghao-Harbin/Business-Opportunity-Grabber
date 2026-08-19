@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,8 +27,14 @@ type sgccArchiveDetail struct {
 }
 
 type sgccAttachmentSource struct {
-	Name string
-	URL  string
+	Name        string
+	URL         string
+	AutoExtract bool
+}
+
+type attachmentDownload struct {
+	Content  []byte
+	FileName string
 }
 
 func (a *App) archiveOpportunity(item *Opportunity, category NoticeCategory) {
@@ -76,6 +83,14 @@ func (a *App) archiveOpportunityWithProgress(item *Opportunity, category NoticeC
 	}
 	if !detailAvailable {
 		if category.ID == "sgcc-bid" {
+			if report != nil {
+				report("下载附件", false, "详情暂不可用，正在下载公告文件")
+			}
+			attachments := a.downloadAttachments(sgccBidAnnouncementSources(*item), archivePath)
+			item.Attachments = attachments
+			if report != nil {
+				report("下载附件", true, "公告文件下载完成")
+			}
 			if report != nil {
 				report("生成招标及结果 Excel", false, "详情暂不可用，正在生成待复核招标及结果 Excel")
 			}
@@ -271,54 +286,74 @@ func (a *App) fetchSGCCAnnualPlanDetail(item Opportunity) (sgccArchiveDetail, er
 }
 
 func (a *App) fetchSGCCBidDetail(item Opportunity) (sgccArchiveDetail, error) {
-	id := firstNonEmpty(item.DetailID, item.NoticeID)
+	id := firstNonEmpty(item.NoticeID, item.DetailID)
 	if id == "" {
 		return sgccArchiveDetail{}, fmt.Errorf("资格预审公告缺少详情标识")
 	}
-	var response struct {
-		Successful  bool            `json:"successful"`
-		ResultHint  string          `json:"resultHint"`
-		ResultValue json.RawMessage `json:"resultValue"`
-	}
-	if err := a.postJSON(sgccCoreURL+"index/getNoticeBid", id, &response); err != nil {
-		return sgccArchiveDetail{}, err
-	}
-	var result struct {
-		Notice   map[string]any `json:"notice"`
-		FileFlag any            `json:"fileFlag"`
-	}
-	resultValue := bytes.TrimSpace(response.ResultValue)
-	if len(resultValue) > 0 && resultValue[0] == '"' {
-		var encoded string
-		if err := json.Unmarshal(resultValue, &encoded); err != nil {
-			return sgccArchiveDetail{}, fmt.Errorf("招标公告详情数据解析失败：%w", err)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var response struct {
+			Successful  bool            `json:"successful"`
+			ResultHint  string          `json:"resultHint"`
+			ResultValue json.RawMessage `json:"resultValue"`
 		}
-		resultValue = []byte(encoded)
-	}
-	if err := json.Unmarshal(resultValue, &result); err != nil {
-		return sgccArchiveDetail{}, fmt.Errorf("招标公告详情数据解析失败：%w", err)
-	}
-	if !response.Successful || len(result.Notice) == 0 {
-		return sgccArchiveDetail{}, fmt.Errorf("资格预审详情接口未返回正文：%s", response.ResultHint)
-	}
-	lines := flattenRecord("招标公告", result.Notice)
-	body := strings.Join(lines, "\n")
-	if content, ok := mapString(result.Notice, "CONT", "CONTENT", "NOTICE_CONTENT"); ok {
-		body = documentTextFromHTML(content)
-		if body == "" {
-			body = strings.Join(lines, "\n")
+		if err := a.postJSON(sgccCoreURL+"index/getNoticeBid", id, &response); err != nil {
+			lastErr = err
+			continue
 		}
-	}
-	attachments := []sgccAttachmentSource{}
-	if sgccFileAvailable(result.FileFlag) {
-		detailID, _ := mapString(result.Notice, "NOTICE_DET_ID", "NOTICE_DETAIL_ID", "ID")
-		attachmentURL := sgccCoreURL + "index/downLoadBid?noticeId=" + url.QueryEscape(id)
-		if detailID != "" {
-			attachmentURL += "&noticeDetId=" + url.QueryEscape(detailID)
+		var result struct {
+			Notice   map[string]any `json:"notice"`
+			FileFlag any            `json:"fileFlag"`
 		}
-		attachments = append(attachments, sgccAttachmentSource{Name: "公告附件.zip", URL: attachmentURL})
+		resultValue := bytes.TrimSpace(response.ResultValue)
+		if len(resultValue) > 0 && resultValue[0] == '"' {
+			var encoded string
+			if err := json.Unmarshal(resultValue, &encoded); err != nil {
+				lastErr = fmt.Errorf("招标公告详情数据解析失败：%w", err)
+				continue
+			}
+			resultValue = []byte(encoded)
+		}
+		if err := json.Unmarshal(resultValue, &result); err != nil {
+			lastErr = fmt.Errorf("招标公告详情数据解析失败：%w", err)
+			continue
+		}
+		if !response.Successful || len(result.Notice) == 0 {
+			lastErr = fmt.Errorf("资格预审详情接口未返回正文：%s", response.ResultHint)
+			continue
+		}
+		lines := flattenRecord("招标公告", result.Notice)
+		body := strings.Join(lines, "\n")
+		if content, ok := mapString(result.Notice, "CONT", "CONTENT", "NOTICE_CONTENT"); ok {
+			body = documentTextFromHTML(content)
+			if body == "" {
+				body = strings.Join(lines, "\n")
+			}
+		}
+		attachments := []sgccAttachmentSource{}
+		if sgccFileAvailable(result.FileFlag) {
+			attachments = sgccBidAnnouncementSources(item)
+		}
+		return sgccArchiveDetail{Body: body, Attachments: attachments}, nil
 	}
-	return sgccArchiveDetail{Body: body, Attachments: attachments}, nil
+	if lastErr == nil {
+		lastErr = fmt.Errorf("资格预审详情接口未返回正文")
+	}
+	return sgccArchiveDetail{}, lastErr
+}
+
+func sgccBidAnnouncementSources(item Opportunity) []sgccAttachmentSource {
+	noticeID := strings.TrimSpace(item.NoticeID)
+	if noticeID == "" {
+		return nil
+	}
+	return []sgccAttachmentSource{{Name: "公告文件.zip", URL: sgccBidAttachmentURL(noticeID), AutoExtract: true}}
+}
+
+// The public page's "下载公告文件" button passes noticeDetId as an empty value.
+// The list's detail ID must never be substituted here, or the server returns an empty ZIP.
+func sgccBidAttachmentURL(noticeID string) string {
+	return sgccCoreURL + "/index/downLoadBid?noticeId=" + url.QueryEscape(strings.TrimSpace(noticeID)) + "&noticeDetId="
 }
 
 func firstNonEmpty(values ...string) string {
@@ -454,27 +489,39 @@ func (a *App) replaceArchivedOpportunity(updated Opportunity) {
 func (a *App) downloadAttachments(sources []sgccAttachmentSource, archivePath string) []Attachment {
 	attachments := make([]Attachment, 0, len(sources))
 	for index, source := range sources {
-		name := attachmentName(source.Name, source.URL)
-		name = uniqueAttachmentName(archivePath, name, index)
-		attachment := Attachment{Name: name, SourceURL: source.URL, Status: "待下载"}
-		content, err := a.fetchAttachmentDocument(source.URL)
+		attachment := Attachment{Name: attachmentName(source.Name, source.URL), SourceURL: source.URL, Status: "待下载"}
+		download, err := a.fetchAttachmentDocument(source.URL)
 		if err != nil {
 			attachment.Status = "下载失败"
 			attachment.ErrorReason = err.Error()
 			attachments = append(attachments, attachment)
 			continue
 		}
+		name := firstNonEmpty(download.FileName, source.Name, attachment.Name)
+		if source.AutoExtract && isZipContent(download.Content) && !strings.EqualFold(filepath.Ext(name), ".zip") {
+			name += ".zip"
+		}
+		name = uniqueAttachmentName(archivePath, attachmentName(name, source.URL), index)
+		attachment.Name = name
 		localPath := filepath.Join(archivePath, name)
-		if err := os.WriteFile(localPath, content, 0644); err != nil {
+		if err := os.WriteFile(localPath, download.Content, 0644); err != nil {
 			attachment.Status = "下载失败"
 			attachment.ErrorReason = err.Error()
 			attachments = append(attachments, attachment)
 			continue
 		}
-		sum := sha1.Sum(content)
+		sum := sha1.Sum(download.Content)
 		attachment.LocalPath = localPath
-		attachment.Size = int64(len(content))
+		attachment.Size = int64(len(download.Content))
 		attachment.Hash = hex.EncodeToString(sum[:])
+		if source.AutoExtract && isZipContent(download.Content) {
+			if _, err := unzipBidAttachment(localPath, archivePath); err != nil {
+				attachment.Status = "解压失败"
+				attachment.ErrorReason = fmt.Sprintf("公告文件已下载，但解压失败：%v", err)
+				attachments = append(attachments, attachment)
+				continue
+			}
+		}
 		attachment.Status = "已下载"
 		attachments = append(attachments, attachment)
 	}
@@ -514,13 +561,13 @@ func (a *App) fetchPublicDocument(sourceURL string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(response.Body, 25*1024*1024))
 }
 
-func (a *App) fetchAttachmentDocument(sourceURL string) ([]byte, error) {
+func (a *App) fetchAttachmentDocument(sourceURL string) (attachmentDownload, error) {
 	if strings.TrimSpace(sourceURL) == "" {
-		return nil, fmt.Errorf("附件地址为空")
+		return attachmentDownload{}, fmt.Errorf("附件地址为空")
 	}
 	request, err := http.NewRequest(http.MethodGet, sourceURL, nil)
 	if err != nil {
-		return nil, err
+		return attachmentDownload{}, err
 	}
 	request.Header.Set("User-Agent", "Mozilla/5.0 OpportunityCrawler/0.2")
 	request.Header.Set("Accept", "application/octet-stream,*/*")
@@ -528,21 +575,38 @@ func (a *App) fetchAttachmentDocument(sourceURL string) ([]byte, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return attachmentDownload{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("附件下载失败：HTTP %d", response.StatusCode)
+		return attachmentDownload{}, fmt.Errorf("附件下载失败：HTTP %d", response.StatusCode)
 	}
 	const maxAttachmentSize = 512 * 1024 * 1024
 	content, err := io.ReadAll(io.LimitReader(response.Body, maxAttachmentSize+1))
 	if err != nil {
-		return nil, err
+		return attachmentDownload{}, err
 	}
 	if len(content) > maxAttachmentSize {
-		return nil, fmt.Errorf("附件超过 512 MB 限制")
+		return attachmentDownload{}, fmt.Errorf("附件超过 512 MB 限制")
 	}
-	return content, nil
+	return attachmentDownload{Content: content, FileName: contentDispositionFilename(response.Header.Get("Content-Disposition"))}, nil
+}
+
+func contentDispositionFilename(value string) string {
+	_, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(params["filename"])
+	if decoded, err := url.QueryUnescape(name); err == nil {
+		name = decoded
+	}
+	return sanitizeFileName(name)
+}
+
+func isZipContent(content []byte) bool {
+	return len(content) >= 4 && bytes.Equal(content[:2], []byte{'P', 'K'}) &&
+		(bytes.Equal(content[2:4], []byte{3, 4}) || bytes.Equal(content[2:4], []byte{5, 6}) || bytes.Equal(content[2:4], []byte{7, 8}))
 }
 
 func archiveFolderName(item Opportunity) string {

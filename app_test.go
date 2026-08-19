@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 func TestParseCSGHTMLForOpportunities(t *testing.T) {
@@ -112,6 +116,45 @@ func TestLiveSingleSourceArchiveDetail(t *testing.T) {
 	}
 }
 
+func TestLiveBidAnnouncementDetailAndDownload(t *testing.T) {
+	if os.Getenv("SGCC_LIVE_DETAIL") != "1" {
+		t.Skip("live detail verification is opt-in")
+	}
+	app := NewApp()
+	item := Opportunity{NoticeID: "2608189739928729", DetailID: "2608189740080817"}
+	detail, err := app.fetchSGCCBidDetail(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(detail.Body) == "" || len(detail.Attachments) != 1 {
+		t.Fatalf("expected bid detail and announcement attachment, got %#v", detail)
+	}
+	download, err := app.fetchAttachmentDocument(detail.Attachments[0].URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isZipContent(download.Content) || len(download.Content) <= 22 {
+		t.Fatalf("expected non-empty announcement ZIP, got %d bytes", len(download.Content))
+	}
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "招标公告.zip")
+	if err := os.WriteFile(zipPath, download.Content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := unzipBidAttachment(zipPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("expected the real announcement ZIP to contain files")
+	}
+	for _, path := range paths {
+		if !strings.HasPrefix(path, filepath.Join(root, "招标公告")) || strings.Contains(filepath.Base(path), "�") {
+			t.Fatalf("unexpected extracted path: %q", path)
+		}
+	}
+}
+
 func TestArchiveNeedsRefreshWhenDetailWasNeverFetched(t *testing.T) {
 	root := t.TempDir()
 	item := Opportunity{Title: "测试公告", ArchivePath: root}
@@ -195,6 +238,81 @@ func TestArchiveOpportunityWritesSnapshotAndAttachment(t *testing.T) {
 	}
 	if len(item.Attachments) != 1 || item.Attachments[0].Status != "已下载" {
 		t.Fatalf("unexpected attachments: %#v", item.Attachments)
+	}
+}
+
+func TestDownloadBidAnnouncementFileUsesResponseNameAndExtractsZIP(t *testing.T) {
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	entry, err := zipWriter.Create("需求一览表.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("test workbook")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Disposition", "attachment; filename=%E6%8B%9B%E6%A0%87%E5%85%AC%E5%91%8A.zip")
+		writer.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = writer.Write(archive.Bytes())
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	attachments := NewApp().downloadAttachments([]sgccAttachmentSource{{
+		Name:        "公告文件",
+		URL:         server.URL,
+		AutoExtract: true,
+	}}, root)
+	if len(attachments) != 1 {
+		t.Fatalf("expected one attachment, got %#v", attachments)
+	}
+	if attachments[0].Status != "已下载" || attachments[0].Name != "招标公告.zip" {
+		t.Fatalf("unexpected attachment: %#v", attachments[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, "招标公告.zip")); err != nil {
+		t.Fatalf("expected downloaded ZIP: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "招标公告", "需求一览表.xlsx")); err != nil {
+		t.Fatalf("expected extracted announcement file: %v", err)
+	}
+}
+
+func TestDecodeZIPEntryNameDecodesGBK(t *testing.T) {
+	encoded, _, err := transform.Bytes(simplifiedchinese.GBK.NewEncoder(), []byte("需求一览表.xlsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := decodeZIPEntryName(string(encoded), true); name != "需求一览表.xlsx" {
+		t.Fatalf("expected GBK file name to decode, got %q", name)
+	}
+}
+
+func TestSGCCBidAttachmentURLMatchesPublicDownloadButton(t *testing.T) {
+	url := sgccBidAttachmentURL("2608189739928729")
+	if !strings.Contains(url, "noticeId=2608189739928729") {
+		t.Fatalf("expected notice ID in download URL, got %q", url)
+	}
+	if !strings.HasSuffix(url, "&noticeDetId=") {
+		t.Fatalf("download URL must include an empty noticeDetId like the public page button: %q", url)
+	}
+	if strings.Contains(url, "noticeDetId=2608189740080817") {
+		t.Fatalf("download URL must not use the list detail ID: %q", url)
+	}
+
+	if sources := sgccBidAnnouncementSources(Opportunity{NoticeID: "2608189739928729"}); len(sources) != 1 || sources[0].URL != url {
+		t.Fatalf("expected a public announcement source, got %#v", sources)
+	}
+}
+
+func TestSGCCBidDetailUsesNoticeIDForPublicEndpoints(t *testing.T) {
+	item := Opportunity{NoticeID: "2608189739928729", DetailID: "2608189740080817"}
+	if sources := sgccBidAnnouncementSources(item); len(sources) != 1 || !strings.Contains(sources[0].URL, "noticeId=2608189739928729") {
+		t.Fatalf("expected download to use notice ID, got %#v", sources)
 	}
 }
 
